@@ -51,18 +51,21 @@ export async function generatePdf(
   const fonts = await embedFonts(doc, settings);
   const flow = new Flow(doc, settings, fonts);
 
-  if (settings.coverPage && sorted.length > 0) {
-    drawCover(flow, sorted);
-    flow.finishPageForCover();
-  }
-
+  // Content is laid out first so the cover's table of contents can point at
+  // real page numbers; the cover is inserted in front afterwards.
+  const toc: TocEntry[] = [];
   for (let i = 0; i < sorted.length; i++) {
     const post = sorted[i];
     onProgress(`Laying out ${i + 1}/${sorted.length}: ${post.title}`);
-    await layoutPost(flow, post, settings);
+    const page = await layoutPost(flow, post, settings);
+    toc.push({ publication: post.publication, title: post.title, dateMs: post.dateMs, page });
   }
 
   flow.drawFooters(sorted);
+
+  if (settings.coverPage && sorted.length > 0) {
+    drawCover(doc, flow, toc, sorted);
+  }
 
   if (settings.bookletImposition) {
     onProgress("Imposing booklet sheets…");
@@ -104,7 +107,7 @@ class Flow {
   private col = 0;
   y = 0;
   private started = false;
-  private coverPages = 0;
+  private pagesAdded = 0;
 
   constructor(
     private doc: PDFDocument,
@@ -148,8 +151,14 @@ class Flow {
 
   addPage() {
     this.page = this.doc.addPage([this.pageW, this.pageH]);
+    this.pagesAdded += 1;
     this.col = 0;
     this.y = this.pageH - this.mTop;
+  }
+
+  /** 1-based number of the page currently being drawn. */
+  get pageNumber(): number {
+    return this.pagesAdded;
   }
 
   nextColumn() {
@@ -178,19 +187,14 @@ class Flow {
     return this.doc.embedJpg(bytes);
   }
 
-  /** Cover is drawn on its own page created by the caller. */
-  finishPageForCover() {
-    this.coverPages = this.doc.getPageCount();
-    this.started = false; // next content draw starts a fresh page
-  }
-
+  /** Numbers every page; called before the cover is inserted in front. */
   drawFooters(posts: DigestPost[]) {
     if (!this.settings.pageNumbers) return;
     const pages = this.doc.getPages();
     const label = dateRangeLabel(posts);
-    for (let i = this.coverPages; i < pages.length; i++) {
+    for (let i = 0; i < pages.length; i++) {
       const p = pages[i];
-      const n = String(i + 1 - this.coverPages);
+      const n = String(i + 1);
       const f = this.fonts.regular;
       const size = 7.5;
       p.drawText(n, {
@@ -322,13 +326,15 @@ function drawParagraph(flow: Flow, text: string, opts: ParaOpts) {
 // ---------------------------------------------------------------------------
 // Post layout
 
-async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings) {
+/** Lays out one post and returns the 1-based page number it starts on. */
+async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Promise<number> {
   const body = s.fontSize;
   flow.ensureStarted();
 
   // Keep the header together: publication + title + date + a couple of lines
   const headerEstimate = body * 6;
   flow.fit(headerEstimate);
+  const startPage = flow.pageNumber;
 
   // Separator above subsequent posts in the same column
   if (flow.remaining < flow.colHeight - 1) {
@@ -366,6 +372,7 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings) {
   for (const block of post.blocks) {
     await layoutBlock(flow, block, s);
   }
+  return startPage;
 }
 
 async function layoutBlock(flow: Flow, block: Block, s: LayoutSettings) {
@@ -478,12 +485,21 @@ function drawImage(flow: Flow, pdfImage: PDFImage, img: PreparedImage, body: num
 }
 
 // ---------------------------------------------------------------------------
-// Cover
+// Cover: masthead + table of contents
 
-function drawCover(flow: Flow, posts: DigestPost[]) {
-  flow.addPage();
+interface TocEntry {
+  publication: string;
+  title: string;
+  dateMs: number;
+  page: number;
+}
+
+function drawCover(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: DigestPost[]) {
   const { pageW, pageH, fonts } = flow;
-  const page = flow.page;
+  const page = doc.insertPage(0, [pageW, pageH]);
+
+  const margin = Math.max(pageW * 0.09, 34);
+  const width = pageW - margin * 2;
   const center = (text: string, y: number, font: PDFFont, size: number, color = INK) => {
     const t = sanitize(text);
     page.drawText(t, {
@@ -495,27 +511,119 @@ function drawCover(flow: Flow, posts: DigestPost[]) {
     });
   };
 
-  let y = pageH * 0.72;
-  center("SUBSTACK", y + 30, fonts.regular, 11, MUTED);
-  center("Digest", y, fonts.bold, 40);
+  // Masthead
+  const mastY = pageH - Math.max(pageH * 0.1, 44);
+  center("S U B S T A C K", mastY + 26, fonts.regular, 9, MUTED);
+  center("Digest", mastY, fonts.bold, 34);
   page.drawLine({
-    start: { x: pageW * 0.3, y: y - 16 },
-    end: { x: pageW * 0.7, y: y - 16 },
+    start: { x: margin, y: mastY - 14 },
+    end: { x: pageW - margin, y: mastY - 14 },
     thickness: 1,
+    color: INK,
+  });
+  const pubs = [...new Set(posts.map((p) => p.publication))];
+  const subtitle = `${dateRangeLabel(posts)}   ·   ${posts.length} post${posts.length === 1 ? "" : "s"} from ${pubs.length} publication${pubs.length === 1 ? "" : "s"}`;
+  center(subtitle, mastY - 30, fonts.italic, 9, MUTED);
+
+  // Contents
+  let y = mastY - 64;
+  const bottom = Math.max(pageH * 0.07, 30);
+  const titleSize = Math.min(10.5, Math.max(8.5, pageH / 60));
+  const metaSize = titleSize * 0.78;
+  const pageNumW = fonts.bold.widthOfTextAtSize("000", titleSize) + 8;
+  const titleW = width - pageNumW;
+
+  for (let i = 0; i < toc.length; i++) {
+    const entry = toc[i];
+    const title = sanitize(entry.title);
+    let lines = wrapText(title, fonts.bold, titleSize, titleW);
+    if (lines.length > 2) {
+      lines = lines.slice(0, 2);
+      lines[1] = truncateToWidth(`${lines[1]}…`, fonts.bold, titleSize, titleW);
+    }
+    const entryH = lines.length * titleSize * 1.25 + metaSize * 1.5 + titleSize * 0.9;
+
+    // Out of room: summarize the rest instead of overflowing
+    if (y - entryH < bottom) {
+      const rest = toc.length - i;
+      page.drawText(sanitize(`+ ${rest} more post${rest === 1 ? "" : "s"} inside`), {
+        x: margin,
+        y: Math.max(y - titleSize * 1.4, bottom),
+        size: metaSize,
+        font: fonts.italic,
+        color: MUTED,
+      });
+      break;
+    }
+
+    // Title lines, with the page number and dot leader on the first line
+    for (let l = 0; l < lines.length; l++) {
+      y -= titleSize * 1.25;
+      page.drawText(lines[l], {
+        x: margin,
+        y,
+        size: titleSize,
+        font: fonts.bold,
+        color: INK,
+      });
+      if (l === 0) {
+        const num = String(entry.page);
+        const numX = pageW - margin - fonts.bold.widthOfTextAtSize(num, titleSize);
+        page.drawText(num, { x: numX, y, size: titleSize, font: fonts.bold, color: INK });
+        drawDotLeader(
+          page,
+          margin + fonts.bold.widthOfTextAtSize(lines[l], titleSize) + 5,
+          numX - 5,
+          y,
+          fonts.regular,
+          titleSize
+        );
+      }
+    }
+
+    y -= metaSize * 1.5;
+    const meta = `${entry.publication}  ·  ${new Date(entry.dateMs).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    })}`;
+    page.drawText(truncateToWidth(sanitize(meta), fonts.italic, metaSize, titleW), {
+      x: margin,
+      y,
+      size: metaSize,
+      font: fonts.italic,
+      color: MUTED,
+    });
+    y -= titleSize * 0.9;
+  }
+}
+
+function drawDotLeader(
+  page: PDFPage,
+  x0: number,
+  x1: number,
+  y: number,
+  font: PDFFont,
+  size: number
+) {
+  const dotW = font.widthOfTextAtSize(" .", size);
+  const count = Math.floor((x1 - x0) / dotW);
+  if (count < 2) return;
+  page.drawText(" .".repeat(count), {
+    x: x1 - count * dotW,
+    y,
+    size,
+    font,
     color: RULE,
   });
-  center(dateRangeLabel(posts), y - 38, fonts.italic, 11, MUTED);
+}
 
-  const pubs = [...new Set(posts.map((p) => p.publication))];
-  const count = `${posts.length} post${posts.length === 1 ? "" : "s"} from ${pubs.length} publication${pubs.length === 1 ? "" : "s"}`;
-  center(count, y - 58, fonts.regular, 9, MUTED);
-
-  let listY = pageH * 0.42;
-  for (const pub of pubs.slice(0, 14)) {
-    center(pub, listY, fonts.regular, 9.5);
-    listY -= 16;
+function truncateToWidth(text: string, font: PDFFont, size: number, width: number): string {
+  if (font.widthOfTextAtSize(text, size) <= width) return text;
+  let t = text;
+  while (t.length > 1 && font.widthOfTextAtSize(`${t}…`, size) > width) {
+    t = t.slice(0, -1).trimEnd();
   }
-  if (pubs.length > 14) center(`+ ${pubs.length - 14} more`, listY, fonts.italic, 9, MUTED);
+  return `${t}…`;
 }
 
 // ---------------------------------------------------------------------------

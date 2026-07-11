@@ -14,7 +14,8 @@ little magazine of your recent reading.
 3. **Select** — check/uncheck whole publications or individual posts.
 4. **Generate** — a custom layout engine flows the posts (publication name,
    title, date, body text, and images scaled to fit) in chronological order
-   into a PDF, with an optional cover page, page numbers, and optional 2-up
+   into a PDF, with an optional cover that carries the table of contents
+   (each post with its page number), page numbers, and optional 2-up
    saddle-stitch imposition so you can print, fold, and staple a booklet.
 
 The window has three columns: account + discovered posts on the left, PDF

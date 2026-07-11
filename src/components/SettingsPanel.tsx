@@ -56,7 +56,7 @@ export function SettingsPanel({ settings, onChange }: Props) {
             checked={settings.coverPage}
             onChange={(e) => set("coverPage", e.target.checked)}
           />
-          Cover page
+          Cover with table of contents
         </label>
         <label className="check">
           <input
