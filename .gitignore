@@ -1,0 +1,7 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen/apple/build
+src-tauri/gen/apple/Pods
+.DS_Store
+*.local

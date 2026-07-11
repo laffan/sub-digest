@@ -1,0 +1,32 @@
+[package]
+name = "sub-digest"
+version = "0.1.0"
+description = "Substack newsletter digest to printable PDF booklet"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "sub_digest_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+tokio = { version = "1", features = ["net", "io-util", "time"] }
+futures = "0.3"
+base64 = "0.22"
+url = "2"
+rand = "0.8"
+sha2 = "0.10"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
