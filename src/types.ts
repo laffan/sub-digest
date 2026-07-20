@@ -19,6 +19,12 @@ export interface Publication {
   posts: Post[];
 }
 
+/** Per-publication agent configuration, keyed by publication name. */
+export interface AgentConfig {
+  useAgent: boolean;
+  instructions: string;
+}
+
 export type FontFamily = "Helvetica" | "Times" | "Courier";
 export type PageSizeName = "A5" | "HalfLetter" | "A4" | "Letter";
 

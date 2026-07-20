@@ -4,7 +4,10 @@ import { AuthPanel } from "./components/AuthPanel";
 import { PostList } from "./components/PostList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
+import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
+import { DEFAULT_ANTHROPIC_MODEL, anthropicProcess } from "./anthropic";
+import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
   gmailConnect,
@@ -17,11 +20,30 @@ import {
 } from "./gmail";
 import { parseEmailHtml, parsePlainText } from "./parse";
 import { generatePdf } from "./pdf/layout";
-import { DEFAULT_SETTINGS, type DigestPost, type LayoutSettings, type Post } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  type AgentConfig,
+  type DigestPost,
+  type LayoutSettings,
+  type Post,
+} from "./types";
 
 const SETTINGS_KEY = "subdigest.settings";
 const DOMAINS_KEY = "subdigest.domains";
+const AGENTS_KEY = "subdigest.agentConfigs";
+const ANTHROPIC_KEY = "subdigest.anthropicKey";
+const ANTHROPIC_MODEL_KEY = "subdigest.anthropicModel";
 const DEFAULT_DOMAINS = ["substack.com"];
+
+function loadJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) return JSON.parse(raw) as T;
+  } catch {
+    /* fall through */
+  }
+  return fallback;
+}
 
 function loadSettings(): LayoutSettings {
   try {
@@ -54,7 +76,15 @@ export default function App() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [settings, setSettings] = useState<LayoutSettings>(loadSettings);
   const [domains, setDomains] = useState<string[]>(loadDomains);
-  const [showDomains, setShowDomains] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [agentConfigs, setAgentConfigs] = useState<Record<string, AgentConfig>>(() =>
+    loadJson(AGENTS_KEY, {})
+  );
+  const [agentOptionsFor, setAgentOptionsFor] = useState<string | null>(null);
+  const [anthropicKey, setAnthropicKey] = useState(() => localStorage.getItem(ANTHROPIC_KEY) ?? "");
+  const [anthropicModel, setAnthropicModel] = useState(
+    () => localStorage.getItem(ANTHROPIC_MODEL_KEY) ?? DEFAULT_ANTHROPIC_MODEL
+  );
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +106,31 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(DOMAINS_KEY, JSON.stringify(domains));
   }, [domains]);
+
+  useEffect(() => {
+    localStorage.setItem(AGENTS_KEY, JSON.stringify(agentConfigs));
+  }, [agentConfigs]);
+
+  const saveAnthropic = useCallback((key: string, model: string) => {
+    setAnthropicKey(key);
+    setAnthropicModel(model);
+    localStorage.setItem(ANTHROPIC_KEY, key);
+    localStorage.setItem(ANTHROPIC_MODEL_KEY, model);
+  }, []);
+
+  const toggleAgent = useCallback((name: string, useAgent: boolean) => {
+    setAgentConfigs((cfgs) => ({
+      ...cfgs,
+      [name]: { instructions: cfgs[name]?.instructions ?? "", useAgent },
+    }));
+  }, []);
+
+  const saveAgentInstructions = useCallback((name: string, instructions: string) => {
+    setAgentConfigs((cfgs) => ({
+      ...cfgs,
+      [name]: { useAgent: cfgs[name]?.useAgent ?? true, instructions },
+    }));
+  }, []);
 
   const connect = useCallback(async () => {
     setError(null);
@@ -149,8 +204,29 @@ export default function App() {
           body = await gmailGetBody(p.id);
           bodyCache.current.set(p.id, body);
         }
-        const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
-        const blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
+        const agent = agentConfigs[p.publication];
+        let blocks;
+        if (agent?.useAgent && anthropicKey.trim()) {
+          setProgress(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
+          try {
+            const md = await anthropicProcess(
+              anthropicKey,
+              anthropicModel,
+              agent.instructions,
+              p.subject,
+              body
+            );
+            blocks = markdownToBlocks(md, p.subject);
+          } catch (e) {
+            // Fall back to the default parser rather than failing the whole run.
+            setError(`Agent failed for "${p.publication}" — used default parsing. ${String(e)}`);
+            const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
+            blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
+          }
+        } else {
+          const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
+          blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
+        }
         digest.push({
           publication: p.publication,
           title: p.subject,
@@ -166,7 +242,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [posts, settings]);
+  }, [posts, settings, agentConfigs, anthropicKey, anthropicModel]);
 
   const exportPdf = useCallback(async () => {
     if (!pdfBytes) return;
@@ -194,9 +270,9 @@ export default function App() {
           <h1 className="brand">Sub Digest</h1>
           <button
             className="icon-btn"
-            onClick={() => setShowDomains(true)}
+            onClick={() => setShowSettings(true)}
             aria-label="Settings"
-            title="Domains & settings"
+            title="Domains, agent & settings"
           >
             <GearIcon />
           </button>
@@ -213,10 +289,13 @@ export default function App() {
             posts={posts}
             days={days}
             scanning={scanning}
+            agentConfigs={agentConfigs}
             onDaysChange={setDays}
             onScan={scan}
             onTogglePost={togglePost}
             onTogglePublication={togglePublication}
+            onToggleAgent={toggleAgent}
+            onOpenAgentOptions={setAgentOptionsFor}
           />
         )}
       </aside>
@@ -246,11 +325,24 @@ export default function App() {
         <Preview pdfBytes={pdfBytes} />
       </main>
 
-      {showDomains && (
+      {showSettings && (
         <SettingsModal
           domains={domains}
-          onChange={setDomains}
-          onClose={() => setShowDomains(false)}
+          onDomainsChange={setDomains}
+          anthropicKey={anthropicKey}
+          anthropicModel={anthropicModel}
+          onAnthropicChange={saveAnthropic}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {agentOptionsFor && (
+        <AgentOptionsModal
+          publication={agentOptionsFor}
+          instructions={agentConfigs[agentOptionsFor]?.instructions ?? ""}
+          hasKey={anthropicKey.trim().length > 0}
+          onSave={(instructions) => saveAgentInstructions(agentOptionsFor, instructions)}
+          onClose={() => setAgentOptionsFor(null)}
         />
       )}
     </div>

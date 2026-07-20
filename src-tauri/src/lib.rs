@@ -1,3 +1,4 @@
+mod anthropic;
 mod gmail;
 mod oauth;
 
@@ -30,6 +31,8 @@ pub fn run() {
             gmail::gmail_get_body,
             gmail::fetch_image,
             gmail::save_pdf,
+            anthropic::anthropic_test,
+            anthropic::anthropic_process,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

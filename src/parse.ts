@@ -1,5 +1,126 @@
 import type { Block } from "./types";
 
+/** Strips inline Markdown emphasis/links to plain text (the layout has no inline styling). */
+function inlineText(md: string): string {
+  return md
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // drop inline images (handled separately)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)") // link → "text (url)"
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/~~(.*?)~~/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const IMAGE_RE = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g;
+
+/** Emits image blocks for any Markdown images on a line. */
+function emitImages(line: string, out: Block[]) {
+  let m: RegExpExecArray | null;
+  IMAGE_RE.lastIndex = 0;
+  while ((m = IMAGE_RE.exec(line)) !== null) {
+    out.push({ kind: "image", src: m[1] });
+  }
+}
+
+/**
+ * Converts the Markdown an agent returns into layout blocks. Line-oriented and
+ * forgiving: headings, bullet/ordered lists, blockquotes, images, rules, and
+ * paragraphs, with inline emphasis/links flattened to plain text.
+ */
+export function markdownToBlocks(md: string, subject: string): Block[] {
+  const lines = md.replace(/\r\n/g, "\n").split("\n");
+  const out: Block[] = [];
+  let para: string[] = [];
+  let list: { items: string[]; ordered: boolean } | null = null;
+
+  const flushPara = () => {
+    if (para.length) {
+      const text = inlineText(para.join(" "));
+      if (text) out.push({ kind: "para", text });
+      para = [];
+    }
+  };
+  const flushList = () => {
+    if (list && list.items.length) out.push({ kind: "list", ...list });
+    list = null;
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+
+    if (trimmed === "") {
+      flushPara();
+      flushList();
+      continue;
+    }
+    // Horizontal rule
+    if (/^([-*_])\1{2,}$/.test(trimmed)) {
+      flushPara();
+      flushList();
+      out.push({ kind: "rule" });
+      continue;
+    }
+    // Standalone image line
+    if (/^!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)\s*$/.test(trimmed)) {
+      flushPara();
+      flushList();
+      emitImages(trimmed, out);
+      continue;
+    }
+    // Heading
+    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flushPara();
+      flushList();
+      emitImages(heading[2], out);
+      const text = inlineText(heading[2]);
+      if (text) out.push({ kind: "heading", level: heading[1].length, text });
+      continue;
+    }
+    // Blockquote
+    const quote = trimmed.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushPara();
+      flushList();
+      const text = inlineText(quote[1]);
+      if (text) out.push({ kind: "para", text, style: "quote" });
+      continue;
+    }
+    // List items
+    const bullet = trimmed.match(/^[-*+]\s+(.*)$/);
+    const ordered = trimmed.match(/^(\d+)[.)]\s+(.*)$/);
+    if (bullet || ordered) {
+      flushPara();
+      const wantOrdered = !!ordered;
+      if (!list || list.ordered !== wantOrdered) {
+        flushList();
+        list = { items: [], ordered: wantOrdered };
+      }
+      const body = bullet ? bullet[1] : ordered![2];
+      emitImages(body, out);
+      const text = inlineText(body);
+      if (text) list.items.push(text);
+      continue;
+    }
+    // Paragraph text (also pull out any inline images)
+    flushList();
+    emitImages(line, out);
+    para.push(trimmed);
+  }
+  flushPara();
+  flushList();
+
+  // Drop a leading heading that just repeats the post title.
+  if (out.length && out[0].kind === "heading") {
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+    if (norm(out[0].text) === norm(subject)) out.shift();
+  }
+  return out;
+}
+
 /**
  * Extracts readable content blocks from a Substack newsletter email.
  * Substack HTML varies over time, so this works from a prioritized list of

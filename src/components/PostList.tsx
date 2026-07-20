@@ -1,14 +1,17 @@
-import { useMemo } from "react";
-import type { Post, Publication } from "../types";
+import { useMemo, useState } from "react";
+import type { AgentConfig, Post, Publication } from "../types";
 
 interface Props {
   posts: Post[];
   days: number;
   scanning: boolean;
+  agentConfigs: Record<string, AgentConfig>;
   onDaysChange: (days: number) => void;
   onScan: () => void;
   onTogglePost: (id: string) => void;
   onTogglePublication: (name: string, selected: boolean) => void;
+  onToggleAgent: (name: string, useAgent: boolean) => void;
+  onOpenAgentOptions: (name: string) => void;
 }
 
 // `days: 0` means no lower bound — search the entire archive.
@@ -30,11 +33,16 @@ export function PostList({
   posts,
   days,
   scanning,
+  agentConfigs,
   onDaysChange,
   onScan,
   onTogglePost,
   onTogglePublication,
+  onToggleAgent,
+  onOpenAgentOptions,
 }: Props) {
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+
   const publications = useMemo<Publication[]>(() => {
     const byName = new Map<string, Post[]>();
     for (const p of posts) {
@@ -78,20 +86,60 @@ export function PostList({
         {publications.map((pub) => {
           const all = pub.posts.every((p) => p.selected);
           const some = pub.posts.some((p) => p.selected);
+          const agent = agentConfigs[pub.name];
+          const useAgent = agent?.useAgent ?? false;
+          const menuOpen = openMenu === pub.name;
           return (
             <div className="pub" key={pub.name}>
-              <label className="pub-header">
-                <input
-                  type="checkbox"
-                  checked={all}
-                  ref={(el) => {
-                    if (el) el.indeterminate = some && !all;
-                  }}
-                  onChange={(e) => onTogglePublication(pub.name, e.target.checked)}
-                />
-                <span className="pub-name">{pub.name}</span>
+              <div className="pub-header">
+                <label className="pub-check">
+                  <input
+                    type="checkbox"
+                    checked={all}
+                    ref={(el) => {
+                      if (el) el.indeterminate = some && !all;
+                    }}
+                    onChange={(e) => onTogglePublication(pub.name, e.target.checked)}
+                  />
+                  <span className="pub-name">{pub.name}</span>
+                </label>
                 <span className="pub-count">{pub.posts.length}</span>
-              </label>
+                <button
+                  className={`pub-menu-btn${useAgent ? " active" : ""}`}
+                  aria-label={`Agent menu for ${pub.name}`}
+                  aria-expanded={menuOpen}
+                  title={useAgent ? "Agent enabled" : "Agent options"}
+                  onClick={() => setOpenMenu(menuOpen ? null : pub.name)}
+                >
+                  <CaretIcon />
+                </button>
+
+                {menuOpen && (
+                  <>
+                    <div className="menu-scrim" onClick={() => setOpenMenu(null)} />
+                    <div className="pub-menu" role="menu">
+                      <label className="menu-check">
+                        <input
+                          type="checkbox"
+                          checked={useAgent}
+                          onChange={(e) => onToggleAgent(pub.name, e.target.checked)}
+                        />
+                        Use Agent
+                      </label>
+                      <button
+                        className="menu-item"
+                        disabled={!useAgent}
+                        onClick={() => {
+                          setOpenMenu(null);
+                          onOpenAgentOptions(pub.name);
+                        }}
+                      >
+                        Agent options…
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
               <ul>
                 {pub.posts.map((p) => (
                   <li key={p.id}>
@@ -119,5 +167,13 @@ export function PostList({
         })}
       </div>
     </section>
+  );
+}
+
+function CaretIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
