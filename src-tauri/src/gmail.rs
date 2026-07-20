@@ -16,7 +16,7 @@ use tokio::time::{timeout, Duration};
 use crate::oauth;
 
 const GMAIL: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
-const MAX_MESSAGES: usize = 500;
+const MAX_MESSAGES: usize = 1000;
 const METADATA_CONCURRENCY: usize = 8;
 const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 300;
@@ -362,7 +362,13 @@ pub async fn gmail_search(
     after_ms: i64,
 ) -> Result<Vec<PostMeta>, String> {
     let token = access_token(&app, &state).await?;
-    let query = format!("from:substack.com after:{}", after_ms / 1000);
+    // `messages.list` with `q` searches all mail (archived included), minus
+    // spam/trash. A non-positive `after_ms` means "no lower bound" (All time).
+    let query = if after_ms > 0 {
+        format!("from:substack.com after:{}", after_ms / 1000)
+    } else {
+        "from:substack.com".to_string()
+    };
 
     // Page through matching message ids
     let mut ids: Vec<String> = Vec::new();

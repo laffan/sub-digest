@@ -9,8 +9,9 @@ little magazine of your recent reading.
 1. **Connect Gmail** — sign in with Google (OAuth, read-only scope). You
    provide your own OAuth client ID/secret; tokens are stored locally on the
    device and mail is only ever read, never modified.
-2. **Scan** — finds every email from `substack.com` within a timeframe you
-   choose (7–90 days) and groups it by publication.
+2. **Scan** — finds every email from `substack.com` across your whole mailbox
+   (archived mail included, not just the inbox) within a timeframe you choose —
+   from the last 7 days up to All time — and groups it by publication.
 3. **Select** — check/uncheck whole publications or individual posts.
 4. **Generate** — a custom layout engine flows the posts (publication name,
    title, date, body text, and images scaled to fit) in chronological order

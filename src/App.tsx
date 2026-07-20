@@ -83,7 +83,8 @@ export default function App() {
     setError(null);
     setScanning(true);
     try {
-      const afterMs = Date.now() - days * 24 * 60 * 60 * 1000;
+      // days === 0 → "All time": pass 0 so the backend omits the date filter.
+      const afterMs = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
       const metas = await gmailSearch(afterMs);
       setPosts(
         metas

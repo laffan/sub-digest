@@ -11,7 +11,20 @@ interface Props {
   onTogglePublication: (name: string, selected: boolean) => void;
 }
 
-const TIMEFRAMES = [7, 14, 30, 60, 90];
+// `days: 0` means no lower bound — search the entire archive.
+const TIMEFRAMES: { label: string; days: number }[] = [
+  { label: "Last 7 days", days: 7 },
+  { label: "Last 14 days", days: 14 },
+  { label: "Last 30 days", days: 30 },
+  { label: "Last 3 months", days: 90 },
+  { label: "Last 6 months", days: 183 },
+  { label: "Last year", days: 365 },
+  { label: "Last 2 years", days: 730 },
+  { label: "All time", days: 0 },
+];
+
+/** Matches MAX_MESSAGES in the Rust backend. */
+const SCAN_LIMIT = 1000;
 
 export function PostList({
   posts,
@@ -39,19 +52,26 @@ export function PostList({
       <h2 className="col-title">Posts</h2>
       <div className="scan-row">
         <select value={days} onChange={(e) => onDaysChange(Number(e.target.value))}>
-          {TIMEFRAMES.map((d) => (
-            <option key={d} value={d}>
-              Last {d} days
+          {TIMEFRAMES.map((t) => (
+            <option key={t.days} value={t.days}>
+              {t.label}
             </option>
           ))}
         </select>
         <button className="secondary" disabled={scanning} onClick={onScan}>
-          {scanning ? "Scanning…" : "Scan Inbox"}
+          {scanning ? "Scanning…" : "Scan Mail"}
         </button>
       </div>
 
       {posts.length === 0 && !scanning && (
-        <p className="hint">Scan your inbox to discover Substack posts.</p>
+        <p className="hint">Scan your mail to discover Substack posts (archived included).</p>
+      )}
+
+      {posts.length >= SCAN_LIMIT && (
+        <p className="hint">
+          Showing the first {SCAN_LIMIT.toLocaleString()} matches — narrow the timeframe to
+          reach older ones.
+        </p>
       )}
 
       <div className="pub-list">

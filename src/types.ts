@@ -1,4 +1,4 @@
-/** Metadata for one Substack email discovered in the inbox. */
+/** Metadata for one Substack email discovered in the mailbox. */
 export interface PostMeta {
   id: string;
   /** Raw From header, e.g. `Astral Codex Ten <astralcodexten@substack.com>` */
