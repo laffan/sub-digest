@@ -15,7 +15,13 @@ little magazine of your recent reading.
    7 days up to All time — and groups it by publication. The **gear** by the
    title opens a Settings modal where you add or remove domains (e.g.
    `ghost.io`, `beehiiv.com`, or a specific sender like `news@example.com`).
-3. **Select** — check/uncheck whole publications or individual posts.
+3. **Select** — check/uncheck whole publications or individual posts. Each
+   publication has a dropdown (the caret by its name) to enable a per-newsletter
+   **AI agent** and give it instructions — useful for link roundups or unusual
+   layouts the default parser handles poorly. With an Anthropic API key (set in
+   Settings), flagged newsletters are reformatted by the agent, which can also
+   **fetch a linked page and extract specific DIVs** to pull in just the content
+   it needs without spending tokens on whole pages.
 4. **Generate** — a custom layout engine flows the posts (publication name,
    title, date, and body text) in chronological order into a PDF, with images
    floated to alternating sides at up to half-column width so text wraps around
@@ -174,7 +180,8 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Gmail OAuth (PKCE) | `src-tauri/src/oauth.rs` | Shared PKCE/token core + desktop loopback flow (fixed 127.0.0.1 port) |
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
-| Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels) |
+| Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
+| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional Anthropic agent for hard-to-parse newsletters; returns Markdown. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs) so it pulls just the content it needs. Key/model set in Settings; runs in Rust (no CORS) |
 | Layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, TOC cover, saddle-stitch imposition — built on pdf-lib |
 | Image pipeline | `src/pdf/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js |
@@ -198,3 +205,8 @@ files stay small; text outside WinAnsi (emoji, CJK) is dropped from output.
 - OAuth tokens are stored in the app's local data directory only.
 - Email content and images are fetched directly from Google/Substack CDNs and
   never leave the device.
+- The AI agent is entirely opt-in and per-newsletter. When enabled, that
+  newsletter's content (and any pages its `fetch_page` tool retrieves) is sent
+  to the Anthropic API for reformatting. The API key is stored only on this
+  device. `fetch_page` only requests http(s) URLs and refuses private/loopback
+  addresses.

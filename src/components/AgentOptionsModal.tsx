@@ -10,8 +10,9 @@ interface Props {
 
 const EXAMPLES = [
   "This is a link roundup — list each linked article as a bullet with its one-line summary.",
+  "For each link, fetch the linked article and include its first two paragraphs under the title.",
+  "Fetch each link and extract only the .post-content div; summarize it in 2-3 sentences.",
   "Keep only the main essay; drop the 'what I'm reading' and recommendations sections.",
-  "Preserve every image and its caption; the visuals are the point of this newsletter.",
 ];
 
 export function AgentOptionsModal({
@@ -45,7 +46,9 @@ export function AgentOptionsModal({
         </div>
         <p className="hint">
           Instructions for how the agent should handle posts from{" "}
-          <strong>{publication}</strong>. Describe what to keep, drop, or reshape.
+          <strong>{publication}</strong>. Describe what to keep, drop, or reshape. The agent can
+          also fetch a linked page and pull just the content it needs — optionally from a specific
+          CSS selector / DIV — so you don't pay tokens for whole pages.
         </p>
         {!hasKey && (
           <p className="hint warn">
