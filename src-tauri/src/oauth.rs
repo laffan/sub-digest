@@ -33,18 +33,20 @@ pub async fn authorize(
     http: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
+    port: u16,
 ) -> Result<TokenResponse, String> {
     let verifier = random_token(64);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let csrf = random_token(24);
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("could not open loopback port: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| e.to_string())?
-        .port();
+    // A fixed loopback port gives one stable redirect URI to register in the
+    // Google Cloud Console, which is what Web-application OAuth clients require.
+    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
+        format!(
+            "could not open loopback port {port}: {e}. Close any other running \
+             instance of Sub Digest, or set VITE_OAUTH_REDIRECT_PORT to a free port."
+        )
+    })?;
     let redirect_uri = format!("http://127.0.0.1:{port}");
 
     let mut auth_url = url::Url::parse(AUTH_URL).unwrap();

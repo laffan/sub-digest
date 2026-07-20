@@ -5,3 +5,6 @@ src-tauri/gen/apple/build
 src-tauri/gen/apple/Pods
 .DS_Store
 *.local
+.env
+.env.*
+!.env.example

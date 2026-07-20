@@ -152,14 +152,20 @@ pub async fn gmail_connect(
     state: State<'_, AuthState>,
     client_id: String,
     client_secret: String,
+    redirect_port: u16,
 ) -> Result<String, String> {
     let client_id = client_id.trim().to_string();
     let client_secret = client_secret.trim().to_string();
     if client_id.is_empty() || client_secret.is_empty() {
-        return Err("client ID and secret are required".to_string());
+        return Err(
+            "Gmail OAuth credentials are missing. Add VITE_GMAIL_CLIENT_ID and \
+             VITE_GMAIL_CLIENT_SECRET to a .env file (see .env.example) and restart."
+                .to_string(),
+        );
     }
+    let port = if redirect_port == 0 { 8788 } else { redirect_port };
 
-    let tokens = oauth::authorize(&app, http(), &client_id, &client_secret).await?;
+    let tokens = oauth::authorize(&app, http(), &client_id, &client_secret, port).await?;
 
     let profile = api_get(&tokens.access_token, &format!("{GMAIL}/profile")).await?;
     let email = profile["emailAddress"]

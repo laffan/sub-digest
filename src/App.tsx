@@ -54,11 +54,11 @@ export default function App() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
 
-  const connect = useCallback(async (clientId: string, clientSecret: string) => {
+  const connect = useCallback(async () => {
     setError(null);
     setConnecting(true);
     try {
-      setAccount(await gmailConnect(clientId, clientSecret));
+      setAccount(await gmailConnect());
     } catch (e) {
       setError(String(e));
     } finally {

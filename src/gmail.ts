@@ -1,9 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
+import { OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_PORT } from "./config";
 import type { PostMeta } from "./types";
 
 /** Starts the OAuth flow in the system browser; resolves with the account email. */
-export function gmailConnect(clientId: string, clientSecret: string): Promise<string> {
-  return invoke<string>("gmail_connect", { clientId, clientSecret });
+export function gmailConnect(): Promise<string> {
+  return invoke<string>("gmail_connect", {
+    clientId: OAUTH_CLIENT_ID,
+    clientSecret: OAUTH_CLIENT_SECRET,
+    redirectPort: OAUTH_REDIRECT_PORT,
+  });
 }
 
 /** Returns the connected account's email if a stored token is still usable. */

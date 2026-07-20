@@ -40,13 +40,45 @@ The app uses the Gmail API with your own OAuth client:
    project and **enable the Gmail API**.
 2. Configure the OAuth consent screen (External is fine; add your own Gmail
    address as a test user while the app is in "Testing" status).
-3. Create credentials → **OAuth client ID** → application type **Desktop
-   app**. Copy the client ID and client secret.
-4. Paste both into the left column of the app and click **Connect Gmail**.
-   Sign-in happens in your browser and redirects back to the app on
-   `127.0.0.1` (loopback), per Google's installed-app flow.
+3. Create credentials → **OAuth client ID**. Either application type works:
+   - **Desktop app** — simplest; loopback redirects are accepted
+     automatically.
+   - **Web application** — you must add the redirect URI below under
+     **Authorized redirect URIs**.
+4. **Register the redirect URI.** The app uses a *fixed* loopback port so
+   there's a single, stable URI to register. Add exactly:
+
+   ```
+   http://127.0.0.1:8788
+   ```
+
+   (or `http://127.0.0.1:<port>` if you override `VITE_OAUTH_REDIRECT_PORT`).
+   Registering this exact URI is what resolves the `Error 400:
+   redirect_uri_mismatch` you get with a Web-application client.
+5. Copy the client ID and secret into your `.env` (next section).
 
 The requested scope is `gmail.readonly` only.
+
+### Configure `.env`
+
+Credentials live in a `.env` file at the project root, not in the UI:
+
+```sh
+cp .env.example .env
+```
+
+Then fill in:
+
+```sh
+VITE_GMAIL_CLIENT_ID=your-client-id.apps.googleusercontent.com
+VITE_GMAIL_CLIENT_SECRET=your-client-secret
+VITE_OAUTH_REDIRECT_PORT=8788   # optional; must match the registered URI
+```
+
+These are read at build/dev time by Vite. `.env` is git-ignored; restart the
+dev server after changing it. In the app's left column you'll then see a
+**Connect Gmail** button (and a reminder of the exact redirect URI to
+register).
 
 ### Run (macOS desktop)
 

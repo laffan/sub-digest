@@ -169,6 +169,25 @@ button.link {
   margin-top: 4px;
 }
 
+.redirect-hint {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.hint code,
+.creds-missing code {
+  display: inline-block;
+  font-size: 11px;
+  background: #f1efe9;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-top: 3px;
+  word-break: break-all;
+  color: var(--ink);
+}
+
 .account-row {
   display: flex;
   align-items: center;

@@ -1,25 +1,13 @@
-import { useState } from "react";
+import { HAS_CREDENTIALS, OAUTH_REDIRECT_URI } from "../config";
 
 interface Props {
   account: string | null;
   connecting: boolean;
-  onConnect: (clientId: string, clientSecret: string) => void;
+  onConnect: () => void;
   onDisconnect: () => void;
 }
 
 export function AuthPanel({ account, connecting, onConnect, onDisconnect }: Props) {
-  const [clientId, setClientId] = useState(() => localStorage.getItem("subdigest.clientId") ?? "");
-  const [clientSecret, setClientSecret] = useState(
-    () => localStorage.getItem("subdigest.clientSecret") ?? ""
-  );
-  const [showCreds, setShowCreds] = useState(!account);
-
-  const connect = () => {
-    localStorage.setItem("subdigest.clientId", clientId.trim());
-    localStorage.setItem("subdigest.clientSecret", clientSecret.trim());
-    onConnect(clientId.trim(), clientSecret.trim());
-  };
-
   if (account) {
     return (
       <section className="panel auth">
@@ -39,42 +27,28 @@ export function AuthPanel({ account, connecting, onConnect, onDisconnect }: Prop
   return (
     <section className="panel auth">
       <h2 className="col-title">Gmail Account</h2>
-      <button className="link" onClick={() => setShowCreds((s) => !s)}>
-        {showCreds ? "Hide credentials" : "API credentials"}
-      </button>
-      {showCreds && (
+      {!HAS_CREDENTIALS ? (
+        <div className="creds-missing">
+          <p className="hint">
+            No OAuth credentials found. Copy <code>.env.example</code> to{" "}
+            <code>.env</code>, fill in your Gmail client ID and secret, then restart the
+            app.
+          </p>
+        </div>
+      ) : (
         <>
-          <label>
-            OAuth Client ID
-            <input
-              type="text"
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-              placeholder="xxxx.apps.googleusercontent.com"
-              spellCheck={false}
-            />
-          </label>
-          <label>
-            OAuth Client Secret
-            <input
-              type="password"
-              value={clientSecret}
-              onChange={(e) => setClientSecret(e.target.value)}
-              placeholder="GOCSPX-…"
-              spellCheck={false}
-            />
-          </label>
+          <button className="primary" disabled={connecting} onClick={onConnect}>
+            {connecting ? "Waiting for Google…" : "Connect Gmail"}
+          </button>
+          <p className="hint">
+            Sign-in opens in your browser. Access is read-only and tokens stay on this
+            device.
+          </p>
         </>
       )}
-      <button
-        className="primary"
-        disabled={connecting || !clientId.trim() || !clientSecret.trim()}
-        onClick={connect}
-      >
-        {connecting ? "Waiting for Google…" : "Connect Gmail"}
-      </button>
-      <p className="hint">
-        Sign-in opens in your browser. Access is read-only and tokens stay on this device.
+      <p className="hint redirect-hint">
+        Redirect URI to register in Google Cloud Console:
+        <code>{OAUTH_REDIRECT_URI}</code>
       </p>
     </section>
   );
