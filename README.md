@@ -100,9 +100,13 @@ npm run tauri build    # produce a .app / .dmg
 
 ### iPadOS
 
-The project is set up for Tauri's iOS target (`bundle.iOS` is configured and
-the crate builds as a static lib). To build for iPad you need a Mac with
-Xcode:
+iOS sign-in is implemented: instead of the desktop loopback redirect, the app
+uses a **custom URL scheme** that iOS routes back into the app via
+`tauri-plugin-deep-link`. The backend (`src-tauri/src/gmail.rs`) picks the iOS
+flow automatically when running on iOS — the shared PKCE core, token
+storage/refresh, Gmail API, parser, and PDF engine are identical to desktop.
+
+Building for iPad needs a Mac with Xcode:
 
 ```sh
 npm run tauri ios init
@@ -110,23 +114,53 @@ npm run tauri ios dev      # simulator or device
 npm run tauri ios build
 ```
 
-Two iOS-specific notes:
+Three iOS-specific setup steps (done once, on the Mac):
 
-- Google OAuth: create an additional OAuth client of type **iOS** in the
-  Google Cloud Console. Google's loopback redirect works in the iPad
-  simulator, but on a physical device you should register the reverse-client-ID
-  custom URL scheme and use it as the redirect; wiring that scheme through
-  `tauri-plugin-deep-link` is the intended extension point
-  (`src-tauri/src/oauth.rs` is the only file that would change).
-- "Save PDF…" uses the platform file dialog via `tauri-plugin-dialog`, which
-  presents the iOS document picker.
+1. **Create an iOS OAuth client** in the same Google Cloud project (type
+   **iOS**, Bundle ID `com.subdigest.app`). It shares the consent screen and
+   test users you already configured. Put its client id in `.env` as
+   `VITE_GMAIL_IOS_CLIENT_ID` (iOS clients are public — no secret).
+
+2. **Register the redirect scheme in the iOS `Info.plist`.** After
+   `tauri ios init`, add to `src-tauri/gen/apple/<app>_iOS/Info.plist` so iOS
+   hands the redirect back to the app:
+
+   ```xml
+   <key>CFBundleURLTypes</key>
+   <array>
+     <dict>
+       <key>CFBundleURLSchemes</key>
+       <array>
+         <string>com.subdigest.app</string>
+       </array>
+     </dict>
+   </array>
+   ```
+
+   This must match `VITE_GMAIL_IOS_REDIRECT_SCHEME` (default `com.subdigest.app`,
+   the bundle id). The redirect URI Google receives is
+   `com.subdigest.app:/oauth2redirect`. If you'd rather use the reverse-client-id
+   scheme, set both the plist entry and the env var to
+   `com.googleusercontent.apps.<your-ios-client-id>`.
+
+3. **"Save PDF…"** uses `tauri-plugin-dialog`, which presents the iOS document
+   picker — no extra work.
+
+The loopback flow still works in the **iPad simulator**, so you can develop the
+whole app there before wiring the iOS client for on-device/TestFlight builds.
+
+> Note: the desktop loopback path is verified here (it compiles and runs on
+> Linux/macOS); the iOS deep-link path is fully written and type-checks, but the
+> `Info.plist` scheme registration and on-device redirect can only be verified on
+> a Mac + iPad, since Xcode isn't available in this build environment.
 
 ## How it's built
 
 | Piece | Where | Notes |
 | --- | --- | --- |
-| Gmail OAuth (PKCE + loopback) | `src-tauri/src/oauth.rs` | Opens system browser, fixed 127.0.0.1 port |
-| Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy |
+| Gmail OAuth (PKCE) | `src-tauri/src/oauth.rs` | Shared PKCE/token core + desktop loopback flow (fixed 127.0.0.1 port) |
+| iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
+| Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels) |
 | Layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, image scaling, cover page, saddle-stitch imposition — built on pdf-lib |
 | Image pipeline | `src/pdf/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG |

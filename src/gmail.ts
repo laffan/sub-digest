@@ -1,12 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
-import { OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_PORT } from "./config";
+import {
+  OAUTH_CLIENT_ID,
+  OAUTH_CLIENT_SECRET,
+  OAUTH_IOS_CLIENT_ID,
+  OAUTH_IOS_REDIRECT_SCHEME,
+  OAUTH_REDIRECT_PORT,
+} from "./config";
 import type { PostMeta } from "./types";
 
-/** Starts the OAuth flow in the system browser; resolves with the account email. */
+/**
+ * Starts the OAuth flow in the system browser; resolves with the account email.
+ * All platform credentials are passed; the backend selects desktop (loopback)
+ * or iOS (custom-scheme deep link) based on the OS it's running on.
+ */
 export function gmailConnect(): Promise<string> {
   return invoke<string>("gmail_connect", {
     clientId: OAUTH_CLIENT_ID,
     clientSecret: OAUTH_CLIENT_SECRET,
+    iosClientId: OAUTH_IOS_CLIENT_ID,
+    iosRedirectScheme: OAUTH_IOS_REDIRECT_SCHEME,
     redirectPort: OAUTH_REDIRECT_PORT,
   });
 }

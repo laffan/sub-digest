@@ -1,8 +1,12 @@
-//! Google OAuth 2.0 installed-app flow with PKCE and a loopback redirect.
+//! Google OAuth 2.0 with PKCE.
 //!
-//! Binds an ephemeral port on 127.0.0.1, opens the consent screen in the
-//! system browser, and waits for Google to redirect back with the
-//! authorization code, which is then exchanged for tokens.
+//! Two redirect strategies share the same PKCE/token-exchange core:
+//!
+//! * **Loopback** (desktop): binds a fixed `127.0.0.1` port and waits for the
+//!   browser to redirect back with the authorization code.
+//! * **Deep link** (iOS): the redirect uses a custom URL scheme that the OS
+//!   routes back into the app; that path is driven from `gmail.rs`, which calls
+//!   the [`pkce`], [`build_auth_url`], and [`exchange_code`] helpers here.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -30,7 +34,82 @@ pub struct TokenResponse {
     pub expires_in: u64,
 }
 
-pub async fn authorize(
+/// A fresh PKCE (verifier, S256 challenge) pair.
+pub fn pkce() -> (String, String) {
+    let verifier = random_token(64);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+/// An anti-forgery `state` value.
+pub fn random_state() -> String {
+    random_token(24)
+}
+
+/// Builds the Google authorization URL. `access_type=offline` + `prompt=consent`
+/// ensure a refresh token is returned even on re-authorization.
+pub fn build_auth_url(client_id: &str, redirect_uri: &str, challenge: &str, state: &str) -> String {
+    let mut url = url::Url::parse(AUTH_URL).unwrap();
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("scope", SCOPE)
+        .append_pair("access_type", "offline")
+        .append_pair("prompt", "consent")
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state);
+    url.into()
+}
+
+/// Exchanges an authorization code for tokens. `client_secret` is omitted when
+/// empty, which is correct for public (iOS) clients that authenticate by PKCE.
+pub async fn exchange_code(
+    http: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    code: &str,
+    verifier: &str,
+) -> Result<TokenResponse, String> {
+    let mut form: Vec<(&str, &str)> = vec![
+        ("code", code),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("grant_type", "authorization_code"),
+        ("code_verifier", verifier),
+    ];
+    if !client_secret.is_empty() {
+        form.push(("client_secret", client_secret));
+    }
+
+    let resp = http
+        .post(TOKEN_URL)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("token exchange failed: {e}"))?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("token exchange rejected: {body}"));
+    }
+    let tokens: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("bad token response: {e}"))?;
+    if tokens.refresh_token.is_empty() {
+        return Err(
+            "Google did not return a refresh token. Remove the app's access at \
+             myaccount.google.com/permissions and connect again."
+                .to_string(),
+        );
+    }
+    Ok(tokens)
+}
+
+/// Desktop flow: open the browser, serve the loopback redirect, exchange.
+pub async fn authorize_loopback(
     app: &AppHandle,
     http: &reqwest::Client,
     client_id: &str,
@@ -38,27 +117,14 @@ pub async fn authorize(
     port: u16,
     cancel: Arc<Notify>,
 ) -> Result<TokenResponse, String> {
-    let verifier = random_token(64);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let csrf = random_token(24);
+    let (verifier, challenge) = pkce();
+    let csrf = random_state();
 
     // A fixed loopback port gives one stable redirect URI to register in the
     // Google Cloud Console, which is what Web-application OAuth clients require.
     let listener = bind_with_retry(port).await?;
     let redirect_uri = format!("http://127.0.0.1:{port}");
-
-    let mut auth_url = url::Url::parse(AUTH_URL).unwrap();
-    auth_url
-        .query_pairs_mut()
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", &redirect_uri)
-        .append_pair("response_type", "code")
-        .append_pair("scope", SCOPE)
-        .append_pair("access_type", "offline")
-        .append_pair("prompt", "consent")
-        .append_pair("code_challenge", &challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("state", &csrf);
+    let auth_url = build_auth_url(client_id, &redirect_uri, &challenge, &csrf);
 
     app.opener()
         .open_url(auth_url.as_str(), None::<&str>)
@@ -76,36 +142,7 @@ pub async fn authorize(
         }
     };
 
-    let resp = http
-        .post(TOKEN_URL)
-        .form(&[
-            ("code", code.as_str()),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("grant_type", "authorization_code"),
-            ("code_verifier", verifier.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("token exchange failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token exchange rejected: {body}"));
-    }
-    let tokens: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("bad token response: {e}"))?;
-    if tokens.refresh_token.is_empty() {
-        return Err(
-            "Google did not return a refresh token. Remove the app's access at \
-             myaccount.google.com/permissions and connect again."
-                .to_string(),
-        );
-    }
-    Ok(tokens)
+    exchange_code(http, client_id, client_secret, &redirect_uri, &code, &verifier).await
 }
 
 /// Binds the fixed loopback port, briefly retrying so a just-cancelled prior

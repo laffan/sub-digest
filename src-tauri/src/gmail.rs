@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
-use tokio::sync::Notify;
+use tauri_plugin_opener::OpenerExt;
+use tokio::sync::{oneshot, Notify};
+use tokio::time::{timeout, Duration};
 
 use crate::oauth;
 
@@ -17,14 +19,72 @@ const GMAIL: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 const MAX_MESSAGES: usize = 500;
 const METADATA_CONCURRENCY: usize = 8;
 const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
+const CONNECT_TIMEOUT_SECS: u64 = 300;
+/// Default iOS redirect scheme (the app's bundle id) when `.env` doesn't set one.
+const DEFAULT_IOS_SCHEME: &str = "com.subdigest.app";
 
 #[derive(Default)]
 pub struct AuthState(Mutex<Option<StoredAuth>>);
 
-/// Holds the cancel handle for an in-flight OAuth attempt, so a new attempt
-/// (or an explicit cancel) can abort the previous one and free the port.
+/// Tracks the in-flight OAuth attempt so a new attempt (or an explicit cancel)
+/// can abort the previous one — freeing the loopback port on desktop, or
+/// resolving the pending deep-link wait on iOS.
 #[derive(Default)]
-pub struct ConnectState(Mutex<Option<Arc<Notify>>>);
+pub struct ConnectState {
+    /// Cancel handle for a loopback (desktop) attempt.
+    cancel: Mutex<Option<Arc<Notify>>>,
+    /// Delivery channel for a deep-link (iOS) attempt awaiting its redirect.
+    pending: Mutex<Option<Pending>>,
+}
+
+/// A deep-link attempt waiting for the OS to route the redirect back in.
+struct Pending {
+    csrf: String,
+    tx: oneshot::Sender<Result<String, String>>,
+}
+
+/// Aborts whatever attempt is currently in flight (both strategies).
+fn abort_previous(connect: &ConnectState) {
+    if let Some(prev) = connect.cancel.lock().unwrap().take() {
+        prev.notify_waiters();
+    }
+    if let Some(prev) = connect.pending.lock().unwrap().take() {
+        let _ = prev.tx.send(Err("sign-in cancelled".to_string()));
+    }
+}
+
+/// Called from the deep-link handler (see `lib.rs`) when the OS hands the app a
+/// custom-scheme URL. Matches it to the pending attempt and delivers the code.
+pub fn deliver_deep_link(app: &AppHandle, url: &str) {
+    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    if query.is_empty() {
+        return;
+    }
+    let (mut code, mut state, mut error) = (None, None, None);
+    for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            "error" => error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+
+    let connect = app.state::<ConnectState>();
+    let Some(pending) = connect.pending.lock().unwrap().take() else {
+        return; // no attempt waiting; ignore stray links
+    };
+    if state.as_deref() != Some(pending.csrf.as_str()) {
+        let _ = pending.tx.send(Err("OAuth state mismatch".to_string()));
+        return;
+    }
+    let outcome = match (error, code) {
+        (Some(err), _) => Err(format!("Google sign-in error: {err}")),
+        (None, Some(code)) => Ok(code),
+        (None, None) => Err("no authorization code in redirect".to_string()),
+    };
+    let _ = pending.tx.send(outcome);
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAuth {
@@ -101,14 +161,18 @@ async fn access_token(app: &AppHandle, state: &State<'_, AuthState>) -> Result<S
         return Ok(auth.access_token);
     }
 
+    // Public (iOS) clients have no secret; only send one when present.
+    let mut form: Vec<(&str, &str)> = vec![
+        ("client_id", auth.client_id.as_str()),
+        ("refresh_token", auth.refresh_token.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+    if !auth.client_secret.is_empty() {
+        form.push(("client_secret", auth.client_secret.as_str()));
+    }
     let resp = http()
         .post(oauth::TOKEN_URL)
-        .form(&[
-            ("client_id", auth.client_id.as_str()),
-            ("client_secret", auth.client_secret.as_str()),
-            ("refresh_token", auth.refresh_token.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|e| format!("token refresh failed: {e}"))?;
@@ -153,45 +217,62 @@ async fn api_get(token: &str, url: &str) -> Result<Value, String> {
 // Commands
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn gmail_connect(
     app: AppHandle,
     state: State<'_, AuthState>,
     connect: State<'_, ConnectState>,
     client_id: String,
     client_secret: String,
+    ios_client_id: String,
+    ios_redirect_scheme: String,
     redirect_port: u16,
 ) -> Result<String, String> {
-    let client_id = client_id.trim().to_string();
-    let client_secret = client_secret.trim().to_string();
-    if client_id.is_empty() || client_secret.is_empty() {
-        return Err(
+    // iOS uses a public client (custom-scheme redirect, PKCE, no secret); every
+    // other platform uses the desktop loopback client with its secret.
+    let use_ios = cfg!(target_os = "ios");
+    let (client_id, client_secret) = if use_ios {
+        (ios_client_id.trim().to_string(), String::new())
+    } else {
+        (client_id.trim().to_string(), client_secret.trim().to_string())
+    };
+    if client_id.is_empty() {
+        return Err(if use_ios {
+            "Gmail OAuth is missing an iOS client id. Set VITE_GMAIL_IOS_CLIENT_ID \
+             in .env (see .env.example) and rebuild."
+                .to_string()
+        } else {
             "Gmail OAuth credentials are missing. Add VITE_GMAIL_CLIENT_ID and \
              VITE_GMAIL_CLIENT_SECRET to a .env file (see .env.example) and restart."
-                .to_string(),
-        );
+                .to_string()
+        });
     }
-    let port = if redirect_port == 0 { 8788 } else { redirect_port };
 
-    // Cancel any prior in-flight attempt (freeing the port) and register ours.
-    let cancel = Arc::new(Notify::new());
-    {
-        let mut guard = connect.0.lock().unwrap();
-        if let Some(prev) = guard.take() {
-            prev.notify_waiters();
+    // A new attempt supersedes any prior one (frees the port / cancels the wait).
+    abort_previous(&connect);
+
+    let tokens = if use_ios {
+        let scheme = {
+            let s = ios_redirect_scheme.trim();
+            if s.is_empty() { DEFAULT_IOS_SCHEME } else { s }
+        };
+        connect_via_deep_link(&app, &connect, &client_id, scheme).await?
+    } else {
+        let port = if redirect_port == 0 { 8788 } else { redirect_port };
+        let cancel = Arc::new(Notify::new());
+        *connect.cancel.lock().unwrap() = Some(cancel.clone());
+        let result =
+            oauth::authorize_loopback(&app, http(), &client_id, &client_secret, port, cancel.clone())
+                .await;
+        // Clear our handle if it's still the current one.
+        {
+            let mut guard = connect.cancel.lock().unwrap();
+            if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &cancel)) {
+                *guard = None;
+            }
         }
-        *guard = Some(cancel.clone());
-    }
-
-    let result = oauth::authorize(&app, http(), &client_id, &client_secret, port, cancel.clone()).await;
-
-    // Clear our handle if it's still the current one.
-    {
-        let mut guard = connect.0.lock().unwrap();
-        if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &cancel)) {
-            *guard = None;
-        }
-    }
-    let tokens = result?;
+        result?
+    };
 
     let profile = api_get(&tokens.access_token, &format!("{GMAIL}/profile")).await?;
     let email = profile["emailAddress"]
@@ -227,11 +308,42 @@ pub async fn gmail_status(
     }
 }
 
+/// iOS flow: open the browser, then await the custom-scheme redirect that the
+/// OS routes back into the app via `deliver_deep_link`.
+async fn connect_via_deep_link(
+    app: &AppHandle,
+    connect: &ConnectState,
+    client_id: &str,
+    scheme: &str,
+) -> Result<oauth::TokenResponse, String> {
+    let (verifier, challenge) = oauth::pkce();
+    let csrf = oauth::random_state();
+    let redirect_uri = format!("{scheme}:/oauth2redirect");
+    let auth_url = oauth::build_auth_url(client_id, &redirect_uri, &challenge, &csrf);
+
+    let (tx, rx) = oneshot::channel::<Result<String, String>>();
+    *connect.pending.lock().unwrap() = Some(Pending { csrf, tx });
+
+    app.opener()
+        .open_url(auth_url.as_str(), None::<&str>)
+        .map_err(|e| format!("could not open browser: {e}"))?;
+
+    let code = match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), rx).await {
+        Err(_) => {
+            connect.pending.lock().unwrap().take();
+            return Err("timed out waiting for Google sign-in (5 minutes)".to_string());
+        }
+        // Sender dropped because a newer attempt or cancel superseded this one.
+        Ok(Err(_)) => return Err("sign-in cancelled".to_string()),
+        Ok(Ok(inner)) => inner?,
+    };
+
+    oauth::exchange_code(http(), client_id, "", &redirect_uri, &code, &verifier).await
+}
+
 #[tauri::command]
 pub fn gmail_cancel_connect(connect: State<'_, ConnectState>) {
-    if let Some(cancel) = connect.0.lock().unwrap().take() {
-        cancel.notify_waiters();
-    }
+    abort_previous(&connect);
 }
 
 #[tauri::command]
