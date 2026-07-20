@@ -15,6 +15,9 @@ use std::sync::OnceLock;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The agent runs on Haiku only — fast, cheap, and paired with a strict
+/// capture-only prompt it reformats/scrapes without inventing content.
+const MODEL: &str = "claude-haiku-4-5";
 const MAX_CONTENT_CHARS: usize = 60_000;
 /// Cap on the agent's tool-call rounds, to bound token/time cost per newsletter.
 const MAX_TOOL_ROUNDS: usize = 6;
@@ -27,30 +30,41 @@ const BROWSER_UA: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
-const SYSTEM_PROMPT: &str = "You reformat a single email newsletter into clean \
-Markdown for inclusion in a printed reading digest. You receive the raw email \
-(HTML or plain text) plus optional per-newsletter instructions. Extract the \
-meaningful editorial content and output Markdown only.\n\n\
-Rules:\n\
-- Output GitHub-flavored Markdown and nothing else: no preamble, no explanation, \
-no code fences wrapping the whole answer.\n\
-- Do NOT include the newsletter's title or a top-level # heading; the digest \
-adds its own header.\n\
-- Use ## and ### for section headings, - for bullet lists, 1. for numbered \
-lists, > for quotes, ![](url) for images worth keeping, and --- for a divider.\n\
+const SYSTEM_PROMPT: &str = "You assemble one email newsletter into clean Markdown \
+for a printed reading digest. You are given the raw email (HTML or plain text) \
+plus optional per-newsletter instructions, and you have a `fetch_page` tool that \
+retrieves linked web pages.\n\n\
+ABSOLUTE RULE — capture only, never invent:\n\
+- Every word you output must come verbatim from the provided email or from a page \
+you retrieved with `fetch_page`. Do NOT write anything from your own knowledge, \
+memory, or imagination.\n\
+- If the instructions ask you to include a linked article's content, you MUST \
+call `fetch_page` on that link and use only what it returns. Never reconstruct, \
+guess, paraphrase, or 'fill in' an article you have not actually fetched.\n\
+- If a fetch fails, is blocked, or returns no usable content, output the item's \
+title followed by '(content unavailable)'. Do NOT fabricate a substitute.\n\
+- Add no opinions, commentary, introductions, transitions, or embellishments of \
+your own. Do not summarize unless the instructions explicitly ask; when you must \
+condense, use only wording drawn from the source.\n\n\
+Output format:\n\
+- Output GitHub-flavored Markdown only: no preamble, no explanation, no code \
+fences wrapping the whole answer.\n\
+- Do NOT include the newsletter's title or a top-level # heading; the digest adds \
+its own header.\n\
+- Use ## and ### for section headings, - for bullet lists, 1. for numbered lists, \
+> for quotes, ![](url) for images worth keeping, and --- for a divider.\n\
 - For link-roundup newsletters, render each item as a list entry: the linked \
-title in bold, the destination URL in parentheses if present, then any one-line \
-description the email gives.\n\
+title in bold, the destination URL in parentheses if present, then any \
+description the source itself provides.\n\
 - Strip navigation, subscribe/unsubscribe prompts, social-share buttons, \
-'view in browser', paid-upgrade CTAs, comment/like widgets, and footers/legal.\n\
-- Preserve the author's wording; do not summarize unless the instructions ask.\n\
-- When per-newsletter instructions are present, follow them; they override these \
-defaults.\n\n\
-You have a `fetch_page` tool that retrieves a linked web page. Use it only when \
-the newsletter's own text is insufficient and the instructions call for pulling \
-in linked content. To keep token usage low, prefer passing a CSS `selector` \
-(e.g. 'article', '.post-content', '#main') so you get just the article body \
-rather than the whole page. Fetch no more pages than the task needs.";
+'view in browser', paid-upgrade CTAs, comment/like widgets, and footers/legal.\n\n\
+Using the tool:\n\
+- Fetch a page only when the newsletter's own text is insufficient and the \
+instructions call for linked content. Prefer a CSS `selector` (e.g. 'article', \
+'.post-content', '#main') so you get just the article body and keep costs low. \
+Fetch no more pages than the task needs.\n\n\
+Per-newsletter instructions, when present, take priority over these formatting \
+defaults — but the ABSOLUTE RULE always holds.";
 
 fn tools() -> Value {
     json!([{
@@ -123,23 +137,14 @@ fn extract_text(resp: &Value) -> String {
 
 /// Validates an API key with a tiny request; returns a status string.
 #[tauri::command]
-pub async fn anthropic_test(api_key: String, model: String) -> Result<String, String> {
-    let model = normalize_model(model);
+pub async fn anthropic_test(api_key: String) -> Result<String, String> {
     let body = json!({
-        "model": model,
+        "model": MODEL,
         "max_tokens": 16,
         "messages": [{ "role": "user", "content": "Reply with the single word: ok" }],
     });
     call(&api_key, body).await?;
-    Ok(format!("Connected ({model})"))
-}
-
-fn normalize_model(model: String) -> String {
-    if model.trim().is_empty() {
-        "claude-opus-4-8".to_string()
-    } else {
-        model
-    }
+    Ok("Connected (Claude Haiku 4.5)".to_string())
 }
 
 /// Transforms one newsletter's raw body into Markdown, running the agent's
@@ -147,13 +152,10 @@ fn normalize_model(model: String) -> String {
 #[tauri::command]
 pub async fn anthropic_process(
     api_key: String,
-    model: String,
     instructions: String,
     subject: String,
     content: String,
 ) -> Result<String, String> {
-    let model = normalize_model(model);
-
     let trimmed: String = content.chars().take(MAX_CONTENT_CHARS).collect();
     let instr = instructions.trim();
     let user = format!(
@@ -167,8 +169,9 @@ pub async fn anthropic_process(
 
     for _ in 0..MAX_TOOL_ROUNDS {
         let body = json!({
-            "model": model,
+            "model": MODEL,
             "max_tokens": 8000,
+            "temperature": 0, // deterministic, faithful capture — no creative drift
             "system": SYSTEM_PROMPT,
             "tools": tools(),
             "messages": messages,

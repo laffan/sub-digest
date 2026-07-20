@@ -1,12 +1,11 @@
 import { useState } from "react";
-import { ANTHROPIC_MODELS, anthropicTest } from "../anthropic";
+import { AGENT_MODEL_LABEL, anthropicTest } from "../anthropic";
 
 interface Props {
   domains: string[];
   onDomainsChange: (domains: string[]) => void;
   anthropicKey: string;
-  anthropicModel: string;
-  onAnthropicChange: (key: string, model: string) => void;
+  onAnthropicKeyChange: (key: string) => void;
   onClose: () => void;
 }
 
@@ -27,13 +26,11 @@ export function SettingsModal({
   domains,
   onDomainsChange,
   anthropicKey,
-  anthropicModel,
-  onAnthropicChange,
+  onAnthropicKeyChange,
   onClose,
 }: Props) {
   const [input, setInput] = useState("");
   const [keyDraft, setKeyDraft] = useState(anthropicKey);
-  const [model, setModel] = useState(anthropicModel);
   const [test, setTest] = useState<TestState>({ status: "idle" });
 
   const candidate = normalizeDomain(input);
@@ -46,17 +43,16 @@ export function SettingsModal({
   };
   const removeDomain = (d: string) => onDomainsChange(domains.filter((x) => x !== d));
 
-  const saveAnthropic = (key: string, m: string) => {
+  const saveKey = (key: string) => {
     setKeyDraft(key);
-    setModel(m);
-    onAnthropicChange(key.trim(), m);
+    onAnthropicKeyChange(key.trim());
   };
 
   const runTest = async () => {
-    onAnthropicChange(keyDraft.trim(), model); // persist before testing
+    onAnthropicKeyChange(keyDraft.trim()); // persist before testing
     setTest({ status: "testing" });
     try {
-      const msg = await anthropicTest(keyDraft.trim(), model);
+      const msg = await anthropicTest(keyDraft.trim());
       setTest({ status: "ok", message: msg });
     } catch (e) {
       setTest({ status: "error", message: String(e) });
@@ -126,30 +122,22 @@ export function SettingsModal({
         <h3 className="modal-section">AI agent (Anthropic)</h3>
         <p className="hint">
           Some newsletters (link roundups, unusual layouts) parse poorly. Add an Anthropic API
-          key to let a per-newsletter agent reformat them. The key is stored only on this device.
+          key to let a per-newsletter agent reformat them. It runs on <strong>{AGENT_MODEL_LABEL}</strong>{" "}
+          and only reproduces content it reads or scrapes — no invented text. The key is stored
+          only on this device.
         </p>
         <label>
           API key
           <input
             type="password"
             value={keyDraft}
-            onChange={(e) => saveAnthropic(e.target.value, model)}
+            onChange={(e) => saveKey(e.target.value)}
             placeholder="sk-ant-…"
             autoCapitalize="none"
             autoCorrect="off"
             autoComplete="off"
             spellCheck={false}
           />
-        </label>
-        <label>
-          Model
-          <select value={model} onChange={(e) => saveAnthropic(keyDraft, e.target.value)}>
-            {ANTHROPIC_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
         </label>
         <div className="test-row">
           <button

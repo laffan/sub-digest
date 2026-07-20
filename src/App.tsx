@@ -6,7 +6,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
-import { DEFAULT_ANTHROPIC_MODEL, anthropicProcess } from "./anthropic";
+import { anthropicProcess } from "./anthropic";
 import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
@@ -32,7 +32,6 @@ const SETTINGS_KEY = "subdigest.settings";
 const DOMAINS_KEY = "subdigest.domains";
 const AGENTS_KEY = "subdigest.agentConfigs";
 const ANTHROPIC_KEY = "subdigest.anthropicKey";
-const ANTHROPIC_MODEL_KEY = "subdigest.anthropicModel";
 const DEFAULT_DOMAINS = ["substack.com"];
 
 function loadJson<T>(key: string, fallback: T): T {
@@ -82,9 +81,6 @@ export default function App() {
   );
   const [agentOptionsFor, setAgentOptionsFor] = useState<string | null>(null);
   const [anthropicKey, setAnthropicKey] = useState(() => localStorage.getItem(ANTHROPIC_KEY) ?? "");
-  const [anthropicModel, setAnthropicModel] = useState(
-    () => localStorage.getItem(ANTHROPIC_MODEL_KEY) ?? DEFAULT_ANTHROPIC_MODEL
-  );
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -111,11 +107,9 @@ export default function App() {
     localStorage.setItem(AGENTS_KEY, JSON.stringify(agentConfigs));
   }, [agentConfigs]);
 
-  const saveAnthropic = useCallback((key: string, model: string) => {
+  const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
-    setAnthropicModel(model);
     localStorage.setItem(ANTHROPIC_KEY, key);
-    localStorage.setItem(ANTHROPIC_MODEL_KEY, model);
   }, []);
 
   const toggleAgent = useCallback((name: string, useAgent: boolean) => {
@@ -209,13 +203,7 @@ export default function App() {
         if (agent?.useAgent && anthropicKey.trim()) {
           setProgress(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
           try {
-            const md = await anthropicProcess(
-              anthropicKey,
-              anthropicModel,
-              agent.instructions,
-              p.subject,
-              body
-            );
+            const md = await anthropicProcess(anthropicKey, agent.instructions, p.subject, body);
             blocks = markdownToBlocks(md, p.subject);
           } catch (e) {
             // Fall back to the default parser rather than failing the whole run.
@@ -242,7 +230,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [posts, settings, agentConfigs, anthropicKey, anthropicModel]);
+  }, [posts, settings, agentConfigs, anthropicKey]);
 
   const exportPdf = useCallback(async () => {
     if (!pdfBytes) return;
@@ -330,8 +318,7 @@ export default function App() {
           domains={domains}
           onDomainsChange={setDomains}
           anthropicKey={anthropicKey}
-          anthropicModel={anthropicModel}
-          onAnthropicChange={saveAnthropic}
+          onAnthropicKeyChange={saveAnthropicKey}
           onClose={() => setShowSettings(false)}
         />
       )}

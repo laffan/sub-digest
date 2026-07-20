@@ -181,7 +181,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
-| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional Anthropic agent for hard-to-parse newsletters; returns Markdown. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs) so it pulls just the content it needs. Key/model set in Settings; runs in Rust (no CORS) |
+| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for hard-to-parse newsletters; returns Markdown. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs). API key set in Settings; runs in Rust (no CORS) |
 | Layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, TOC cover, saddle-stitch imposition — built on pdf-lib |
 | Image pipeline | `src/pdf/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js |
