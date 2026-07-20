@@ -49,10 +49,151 @@ body {
   padding: 24px;
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
 .brand {
   font-size: 17px;
-  margin: 0 0 14px;
+  margin: 0;
   letter-spacing: -0.01em;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfaf8;
+  color: var(--muted);
+}
+
+.icon-btn:hover {
+  color: var(--ink);
+  background: #f1efe9;
+}
+
+/* ---- Modal ---- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 25, 15, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+
+.modal {
+  width: 100%;
+  max-width: 420px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 18px 16px;
+  box-shadow: 0 12px 40px rgba(30, 25, 15, 0.25);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.modal-head h2 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.domain-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.domain-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.domain-list li:last-child {
+  border-bottom: none;
+}
+
+.domain-name {
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.link.danger {
+  color: #b34e24;
+  flex: none;
+  min-height: 28px;
+}
+
+.link.danger:disabled {
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+.domain-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.domain-add input {
+  margin-top: 0;
+  flex: 1;
+}
+
+.domain-add button {
+  flex: none;
+}
+
+.modal-foot {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.modal-foot .primary {
+  min-width: 96px;
+}
+
+/* Bigger tap targets on touch devices (iPad) */
+@media (pointer: coarse) {
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+  .modal button,
+  .domain-add input {
+    min-height: 44px;
+  }
+  .link.danger {
+    min-height: 44px;
+    padding: 0 6px;
+  }
 }
 
 .col-title {

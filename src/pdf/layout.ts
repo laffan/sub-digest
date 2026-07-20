@@ -45,7 +45,8 @@ export async function generatePdf(
   const sorted = [...posts].sort((a, b) => a.dateMs - b.dateMs);
 
   const doc = await PDFDocument.create();
-  doc.setTitle("Substack Digest");
+  const title = dateRangeLabel(sorted) || "Substack Digest";
+  doc.setTitle(title);
   doc.setCreator("Sub Digest");
 
   const fonts = await embedFonts(doc, settings);
@@ -69,7 +70,7 @@ export async function generatePdf(
 
   if (settings.bookletImposition) {
     onProgress("Imposing booklet sheets…");
-    return imposeBooklet(await doc.save());
+    return imposeBooklet(await doc.save(), title);
   }
   return doc.save();
 }
@@ -86,6 +87,17 @@ async function embedFonts(doc: PDFDocument, s: LayoutSettings): Promise<FontSet>
     bold: await doc.embedFont(b),
     italic: await doc.embedFont(i),
   };
+}
+
+/**
+ * A floated image the text wraps around: it occupies one side of the column
+ * from the current y down to `bottomY`; lines above `bottomY` are narrowed.
+ */
+interface FloatRegion {
+  side: "left" | "right";
+  width: number;
+  gap: number;
+  bottomY: number;
 }
 
 /**
@@ -108,6 +120,10 @@ class Flow {
   y = 0;
   private started = false;
   private pagesAdded = 0;
+
+  /** The image the current text is wrapping around, if any. */
+  activeFloat: FloatRegion | null = null;
+  private floatCount = 0;
 
   constructor(
     private doc: PDFDocument,
@@ -154,6 +170,7 @@ class Flow {
     this.pagesAdded += 1;
     this.col = 0;
     this.y = this.pageH - this.mTop;
+    this.activeFloat = null; // a float never spans columns/pages
   }
 
   /** 1-based number of the page currently being drawn. */
@@ -166,6 +183,7 @@ class Flow {
     if (this.col + 1 < this.cols) {
       this.col += 1;
       this.y = this.pageH - this.mTop;
+      this.activeFloat = null;
     } else {
       this.addPage();
     }
@@ -185,6 +203,58 @@ class Flow {
 
   embedJpg(bytes: Uint8Array): Promise<PDFImage> {
     return this.doc.embedJpg(bytes);
+  }
+
+  /** The x/width available for a line at the current y, accounting for a float. */
+  lineBox(indent: number): { x: number; width: number } {
+    let x0 = this.colX;
+    let w = this.colW;
+    const f = this.activeFloat;
+    if (f && this.y > f.bottomY + 0.01) {
+      const reserved = f.width + f.gap;
+      if (f.side === "left") x0 = this.colX + reserved;
+      w = this.colW - reserved;
+    }
+    return { x: x0 + indent, width: Math.max(w - indent, this.colW * 0.15) };
+  }
+
+  /** Ends the active float, dropping the cursor below the image if still beside it. */
+  clearFloat() {
+    if (this.activeFloat) {
+      if (this.y > this.activeFloat.bottomY) this.y = this.activeFloat.bottomY;
+      this.activeFloat = null;
+    }
+  }
+
+  /**
+   * Draws an image floated to the alternating side at ≤50% column width, and
+   * records the region so subsequent text wraps beside it. Does not advance y.
+   */
+  placeFloat(pdfImage: PDFImage, img: PreparedImage, body: number) {
+    this.ensureStarted();
+    const gap = body * 0.7;
+    let w = this.colW * 0.5;
+    let h = (img.height / img.width) * w;
+    const maxH = this.colHeight * 0.55;
+    if (h > maxH) {
+      h = maxH;
+      w = (img.width / img.height) * h;
+    }
+    // Ensure vertical room; a fresh-but-too-short column shrinks, otherwise wrap.
+    if (this.remaining < h + body * 0.5) {
+      if (this.remaining >= this.colHeight - 1) {
+        h = this.remaining - body * 0.5;
+        w = (img.width / img.height) * h;
+      } else {
+        this.nextColumn();
+      }
+    }
+    const side: "left" | "right" = this.floatCount % 2 === 0 ? "right" : "left";
+    this.floatCount += 1;
+    const x = side === "left" ? this.colX : this.colX + this.colW - w;
+    const top = this.y;
+    this.page.drawImage(pdfImage, { x, y: top - h, width: w, height: h });
+    this.activeFloat = { side, width: w, gap, bottomY: top - h };
   }
 
   /** Numbers every page; called before the cover is inserted in front. */
@@ -286,41 +356,74 @@ interface ParaOpts {
   hangingPrefix?: string;
 }
 
+/** Greedily fits the largest chunk of `word` into `width`; returns [head, rest]. */
+function hardBreak(word: string, font: PDFFont, size: number, width: number): [string, string] {
+  let head = "";
+  for (let i = 0; i < word.length; i++) {
+    const next = head + word[i];
+    if (head && font.widthOfTextAtSize(next, size) > width) {
+      return [head, word.slice(i)];
+    }
+    head = next;
+  }
+  return [head, ""];
+}
+
+/**
+ * Lays out a paragraph line by line, recomputing the available width for each
+ * line so text wraps around any active floated image.
+ */
 function drawParagraph(flow: Flow, text: string, opts: ParaOpts) {
   const clean = sanitize(text);
   if (!clean) return;
-  const lh = (opts.lineHeight ?? 1.3) * opts.size;
+  const { font, size, color = INK } = opts;
+  const lh = (opts.lineHeight ?? 1.3) * size;
   const indent = opts.indent ?? 0;
   const prefix = opts.hangingPrefix ?? "";
-  const width = flow.colW - indent;
-  const prefixW = prefix ? opts.font.widthOfTextAtSize(prefix, opts.size) : 0;
-  const lines = wrapText(clean, opts.font, opts.size, width - prefixW);
+  const prefixW = prefix ? font.widthOfTextAtSize(prefix, size) : 0;
 
+  const words = clean.split(" ").filter((w) => w.length > 0);
   flow.ensureStarted();
   // Avoid a lone first line at the very bottom of a column
-  flow.fit(Math.min(lines.length, 2) * lh);
+  flow.fit(Math.min(words.length, 2) * lh);
 
-  lines.forEach((line, i) => {
+  let first = true;
+  let idx = 0;
+  while (idx < words.length) {
     if (flow.remaining < lh) flow.nextColumn();
     flow.advance(lh);
-    if (i === 0 && prefix) {
-      flow.page.drawText(prefix, {
-        x: flow.colX + indent,
-        y: flow.y,
-        size: opts.size,
-        font: opts.font,
-        color: opts.color ?? INK,
-      });
+
+    const box = flow.lineBox(indent);
+    const usePrefix = first && prefix.length > 0;
+    const avail = box.width - (usePrefix ? prefixW : 0);
+
+    // Greedily accumulate words that fit the current line's available width.
+    let line = "";
+    while (idx < words.length) {
+      const candidate = line ? `${line} ${words[idx]}` : words[idx];
+      if (font.widthOfTextAtSize(candidate, size) <= avail) {
+        line = candidate;
+        idx += 1;
+      } else if (!line) {
+        // A single word wider than the line: break it across characters.
+        const [head, rest] = hardBreak(words[idx], font, size, avail);
+        line = head;
+        if (rest) words[idx] = rest;
+        else idx += 1;
+        break;
+      } else {
+        break;
+      }
     }
-    flow.page.drawText(line, {
-      x: flow.colX + indent + prefixW,
-      y: flow.y,
-      size: opts.size,
-      font: opts.font,
-      color: opts.color ?? INK,
-    });
-  });
-  flow.advance(opts.spaceAfter ?? opts.size * 0.5);
+
+    const textX = box.x + (usePrefix ? prefixW : 0);
+    if (usePrefix) {
+      flow.page.drawText(prefix, { x: box.x, y: flow.y, size, font, color });
+    }
+    if (line) flow.page.drawText(line, { x: textX, y: flow.y, size, font, color });
+    first = false;
+  }
+  flow.advance(opts.spaceAfter ?? size * 0.5);
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +433,7 @@ function drawParagraph(flow: Flow, text: string, opts: ParaOpts) {
 async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Promise<number> {
   const body = s.fontSize;
   flow.ensureStarted();
+  flow.clearFloat(); // a prior post's float never carries into this one
 
   // Keep the header together: publication + title + date + a couple of lines
   const headerEstimate = body * 6;
@@ -372,6 +476,7 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
   for (const block of post.blocks) {
     await layoutBlock(flow, block, s);
   }
+  flow.clearFloat(); // drop below any trailing floated image before the next post
   return startPage;
 }
 
@@ -438,11 +543,14 @@ async function layoutBlock(flow: Flow, block: Block, s: LayoutSettings) {
       const prepared = await prepareImage(block.src);
       if (prepared) {
         const pdfImage = await flow.embedJpg(prepared.jpeg);
-        drawImage(flow, pdfImage, prepared, body);
+        flow.clearFloat(); // stack floats vertically rather than overlapping
+        flow.advance(body * 0.4);
+        flow.placeFloat(pdfImage, prepared, body);
       }
       break;
     }
     case "rule": {
+      flow.clearFloat();
       flow.fit(body * 2);
       flow.advance(body);
       const cx = flow.colX + flow.colW / 2;
@@ -456,32 +564,6 @@ async function layoutBlock(flow: Flow, block: Block, s: LayoutSettings) {
       break;
     }
   }
-}
-
-function drawImage(flow: Flow, pdfImage: PDFImage, img: PreparedImage, body: number) {
-  // Scale to column width, and never taller than 60% of a column
-  const maxH = flow.colHeight * 0.6;
-  let w = flow.colW;
-  let h = (img.height / img.width) * w;
-  if (h > maxH) {
-    h = maxH;
-    w = (img.width / img.height) * h;
-  }
-  flow.fit(h + body);
-  if (flow.remaining < h) {
-    // Still too tall for a fresh column: shrink to what's available
-    h = flow.remaining - body * 0.5;
-    w = (img.width / img.height) * h;
-    if (h < body * 2) return;
-  }
-  flow.advance(h);
-  flow.page.drawImage(pdfImage, {
-    x: flow.colX + (flow.colW - w) / 2,
-    y: flow.y,
-    width: w,
-    height: h,
-  });
-  flow.advance(body * 0.6);
 }
 
 // ---------------------------------------------------------------------------
@@ -633,11 +715,11 @@ function truncateToWidth(text: string, font: PDFFont, size: number, width: numbe
  * Reorders pages onto double-width sheets so that printing double-sided
  * (flip on short edge) and folding the stack in half yields a booklet.
  */
-async function imposeBooklet(contentBytes: Uint8Array): Promise<Uint8Array> {
+async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<Uint8Array> {
   const src = await PDFDocument.load(contentBytes);
   const n = Math.ceil(src.getPageCount() / 4) * 4;
   const out = await PDFDocument.create();
-  out.setTitle("Substack Digest (booklet)");
+  out.setTitle(title);
 
   const [pw, ph] = [src.getPage(0).getWidth(), src.getPage(0).getHeight()];
   const embedded = await out.embedPages(src.getPages());

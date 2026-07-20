@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "ios:dev": "tauri ios dev",
+    "ios:build": "tauri ios build",
+    "ios:deploy": "tauri ios build && ios-deploy --bundle \"$(node scripts/ios-app-path.mjs)\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",

@@ -37,9 +37,9 @@ export function gmailDisconnect(): Promise<void> {
   return invoke<void>("gmail_disconnect");
 }
 
-/** Lists Substack emails newer than `afterMs` (epoch millis). */
-export function gmailSearch(afterMs: number): Promise<PostMeta[]> {
-  return invoke<PostMeta[]>("gmail_search", { afterMs });
+/** Lists emails from `domains` newer than `afterMs` (epoch millis). */
+export function gmailSearch(afterMs: number, domains: string[]): Promise<PostMeta[]> {
+  return invoke<PostMeta[]>("gmail_search", { afterMs, domains });
 }
 
 /** Returns the HTML body of a message (plain text is wrapped by the backend). */

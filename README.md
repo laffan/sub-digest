@@ -9,15 +9,20 @@ little magazine of your recent reading.
 1. **Connect Gmail** — sign in with Google (OAuth, read-only scope). You
    provide your own OAuth client ID/secret; tokens are stored locally on the
    device and mail is only ever read, never modified.
-2. **Scan** — finds every email from `substack.com` across your whole mailbox
-   (archived mail included, not just the inbox) within a timeframe you choose —
-   from the last 7 days up to All time — and groups it by publication.
+2. **Scan** — finds every email from your configured sender domains
+   (`substack.com` by default) across your whole mailbox (archived mail
+   included, not just the inbox) within a timeframe you choose — from the last
+   7 days up to All time — and groups it by publication. The **gear** by the
+   title opens a Settings modal where you add or remove domains (e.g.
+   `ghost.io`, `beehiiv.com`, or a specific sender like `news@example.com`).
 3. **Select** — check/uncheck whole publications or individual posts.
 4. **Generate** — a custom layout engine flows the posts (publication name,
-   title, date, body text, and images scaled to fit) in chronological order
-   into a PDF, with an optional cover that carries the table of contents
-   (each post with its page number), page numbers, and optional 2-up
-   saddle-stitch imposition so you can print, fold, and staple a booklet.
+   title, date, and body text) in chronological order into a PDF, with images
+   floated to alternating sides at up to half-column width so text wraps around
+   them. An optional cover carries the table of contents (each post with its
+   page number), plus page numbers and optional 2-up saddle-stitch imposition
+   so you can print, fold, and staple a booklet. The PDF's title is the date
+   span of the included posts.
 
 The window has three columns: account + discovered posts on the left, PDF
 settings (page size, margins, columns, font, font size, line height, images,
@@ -111,9 +116,16 @@ Building for iPad needs a Mac with Xcode:
 
 ```sh
 npm run tauri ios init
-npm run tauri ios dev      # simulator or device
-npm run tauri ios build
+npm run ios:dev            # simulator or device
+npm run ios:build          # produce the .app / .ipa
+npm run ios:deploy         # build, then install on a connected device via ios-deploy
 ```
+
+`ios:deploy` runs `tauri ios build` and then hands the freshly built `.app`
+bundle to [`ios-deploy`](https://github.com/ios-control/ios-deploy)
+(`brew install ios-deploy`), which installs and launches it on a connected
+iPad. `scripts/ios-app-path.mjs` locates the newest device build under
+`src-tauri/gen/apple/build`.
 
 Three iOS-specific setup steps (done once, on the Mac):
 
@@ -163,7 +175,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels) |
-| Layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, image scaling, cover page, saddle-stitch imposition — built on pdf-lib |
+| Layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, TOC cover, saddle-stitch imposition — built on pdf-lib |
 | Image pipeline | `src/pdf/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js |
 

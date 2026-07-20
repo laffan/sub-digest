@@ -3,6 +3,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { AuthPanel } from "./components/AuthPanel";
 import { PostList } from "./components/PostList";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { SettingsModal } from "./components/SettingsModal";
 import { Preview } from "./components/Preview";
 import {
   gmailCancelConnect,
@@ -19,6 +20,8 @@ import { generatePdf } from "./pdf/layout";
 import { DEFAULT_SETTINGS, type DigestPost, type LayoutSettings, type Post } from "./types";
 
 const SETTINGS_KEY = "subdigest.settings";
+const DOMAINS_KEY = "subdigest.domains";
+const DEFAULT_DOMAINS = ["substack.com"];
 
 function loadSettings(): LayoutSettings {
   try {
@@ -30,6 +33,19 @@ function loadSettings(): LayoutSettings {
   return DEFAULT_SETTINGS;
 }
 
+function loadDomains(): string[] {
+  try {
+    const raw = localStorage.getItem(DOMAINS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {
+    /* fall through */
+  }
+  return DEFAULT_DOMAINS;
+}
+
 export default function App() {
   const [account, setAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -37,6 +53,8 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [posts, setPosts] = useState<Post[]>([]);
   const [settings, setSettings] = useState<LayoutSettings>(loadSettings);
+  const [domains, setDomains] = useState<string[]>(loadDomains);
+  const [showDomains, setShowDomains] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +72,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem(DOMAINS_KEY, JSON.stringify(domains));
+  }, [domains]);
 
   const connect = useCallback(async () => {
     setError(null);
@@ -85,7 +107,7 @@ export default function App() {
     try {
       // days === 0 → "All time": pass 0 so the backend omits the date filter.
       const afterMs = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
-      const metas = await gmailSearch(afterMs);
+      const metas = await gmailSearch(afterMs, domains);
       setPosts(
         metas
           .map((m) => ({
@@ -100,7 +122,7 @@ export default function App() {
     } finally {
       setScanning(false);
     }
-  }, [days]);
+  }, [days, domains]);
 
   const togglePost = useCallback((id: string) => {
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, selected: !p.selected } : p)));
@@ -168,7 +190,17 @@ export default function App() {
   return (
     <div className="app">
       <aside className="col col-left">
-        <h1 className="brand">Sub Digest</h1>
+        <div className="brand-row">
+          <h1 className="brand">Sub Digest</h1>
+          <button
+            className="icon-btn"
+            onClick={() => setShowDomains(true)}
+            aria-label="Settings"
+            title="Domains & settings"
+          >
+            <GearIcon />
+          </button>
+        </div>
         <AuthPanel
           account={account}
           connecting={connecting}
@@ -213,6 +245,29 @@ export default function App() {
       <main className="col col-preview">
         <Preview pdfBytes={pdfBytes} />
       </main>
+
+      {showDomains && (
+        <SettingsModal
+          domains={domains}
+          onChange={setDomains}
+          onClose={() => setShowDomains(false)}
+        />
+      )}
     </div>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
   );
 }

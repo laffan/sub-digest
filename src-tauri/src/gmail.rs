@@ -360,14 +360,31 @@ pub async fn gmail_search(
     app: AppHandle,
     state: State<'_, AuthState>,
     after_ms: i64,
+    domains: Vec<String>,
 ) -> Result<Vec<PostMeta>, String> {
     let token = access_token(&app, &state).await?;
+
+    // Sanitize to bare domains/addresses and OR them together.
+    let cleaned: Vec<String> = domains
+        .iter()
+        .map(|d| d.trim().trim_start_matches('@').to_lowercase())
+        .filter(|d| !d.is_empty() && !d.contains(' '))
+        .collect();
+    if cleaned.is_empty() {
+        return Err("no sender domains configured".to_string());
+    }
+    let from = if cleaned.len() == 1 {
+        format!("from:{}", cleaned[0])
+    } else {
+        format!("from:({})", cleaned.join(" OR "))
+    };
+
     // `messages.list` with `q` searches all mail (archived included), minus
     // spam/trash. A non-positive `after_ms` means "no lower bound" (All time).
     let query = if after_ms > 0 {
-        format!("from:substack.com after:{}", after_ms / 1000)
+        format!("{from} after:{}", after_ms / 1000)
     } else {
-        "from:substack.com".to_string()
+        from
     };
 
     // Page through matching message ids
