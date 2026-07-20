@@ -11,6 +11,11 @@ export function gmailConnect(): Promise<string> {
   });
 }
 
+/** Aborts an in-flight connect attempt and frees the loopback port. */
+export function gmailCancelConnect(): Promise<void> {
+  return invoke<void>("gmail_cancel_connect");
+}
+
 /** Returns the connected account's email if a stored token is still usable. */
 export function gmailStatus(): Promise<string | null> {
   return invoke<string | null>("gmail_status");

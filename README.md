@@ -38,8 +38,13 @@ The app uses the Gmail API with your own OAuth client:
 
 1. In the [Google Cloud Console](https://console.cloud.google.com), create a
    project and **enable the Gmail API**.
-2. Configure the OAuth consent screen (External is fine; add your own Gmail
-   address as a test user while the app is in "Testing" status).
+2. Configure the OAuth consent screen (**External** is fine). Leave the
+   publishing status as **Testing**, and under **Test users** add the Gmail
+   address you'll sign in with. This step is required: `gmail.readonly` is a
+   *restricted* scope, so in Testing mode Google only lets registered test
+   users authorize — anyone else is blocked with `Error 403: access_denied`.
+   Also confirm `.../auth/gmail.readonly` appears under **Data access /
+   Scopes**.
 3. Create credentials → **OAuth client ID**. Either application type works:
    - **Desktop app** — simplest; loopback redirects are accepted
      automatically.
@@ -58,6 +63,11 @@ The app uses the Gmail API with your own OAuth client:
 5. Copy the client ID and secret into your `.env` (next section).
 
 The requested scope is `gmail.readonly` only.
+
+On the **first** sign-in Google shows a **"Google hasn't verified this app"**
+screen. That's expected for a personal, unverified app — click **Advanced →
+Go to Sub Digest (unsafe)** and continue. (Verification is only needed to
+release restricted scopes publicly, not for your own test-user account.)
 
 ### Configure `.env`
 
@@ -115,7 +125,7 @@ Two iOS-specific notes:
 
 | Piece | Where | Notes |
 | --- | --- | --- |
-| Gmail OAuth (PKCE + loopback) | `src-tauri/src/oauth.rs` | Opens system browser, ephemeral 127.0.0.1 port |
+| Gmail OAuth (PKCE + loopback) | `src-tauri/src/oauth.rs` | Opens system browser, fixed 127.0.0.1 port |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels) |
 | Layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, image scaling, cover page, saddle-stitch imposition — built on pdf-lib |
@@ -124,6 +134,16 @@ Two iOS-specific notes:
 
 Generated PDFs use the PDF standard fonts (Times, Helvetica, Courier), so
 files stay small; text outside WinAnsi (emoji, CJK) is dropped from output.
+
+## Troubleshooting sign-in
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `Error 400: redirect_uri_mismatch` | The redirect URI isn't registered on a Web-application client | Add `http://127.0.0.1:8788` (or your port) under the client's **Authorized redirect URIs**, or use a **Desktop app** client |
+| `Error 403: access_denied` | Your account isn't a **Test user** on the consent screen (required for the restricted `gmail.readonly` scope in Testing mode) | Add your Gmail address under **OAuth consent screen → Test users**, then retry |
+| "Google hasn't verified this app" | Personal app hasn't gone through Google verification (normal) | **Advanced → Go to Sub Digest (unsafe)** to continue |
+| "Google did not return a refresh token" | The app was previously authorized | Remove it at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) and connect again |
+| App stays on "Waiting for Google…" | Sign-in was blocked on Google's side (e.g. access_denied) and never redirected back | Click **Cancel** (frees the port), resolve the error above, then **Connect Gmail** again |
 
 ## Privacy
 

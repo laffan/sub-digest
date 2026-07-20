@@ -6,9 +6,10 @@ use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
+use tokio::sync::Notify;
 
 use crate::oauth;
 
@@ -19,6 +20,11 @@ const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct AuthState(Mutex<Option<StoredAuth>>);
+
+/// Holds the cancel handle for an in-flight OAuth attempt, so a new attempt
+/// (or an explicit cancel) can abort the previous one and free the port.
+#[derive(Default)]
+pub struct ConnectState(Mutex<Option<Arc<Notify>>>);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAuth {
@@ -150,6 +156,7 @@ async fn api_get(token: &str, url: &str) -> Result<Value, String> {
 pub async fn gmail_connect(
     app: AppHandle,
     state: State<'_, AuthState>,
+    connect: State<'_, ConnectState>,
     client_id: String,
     client_secret: String,
     redirect_port: u16,
@@ -165,7 +172,26 @@ pub async fn gmail_connect(
     }
     let port = if redirect_port == 0 { 8788 } else { redirect_port };
 
-    let tokens = oauth::authorize(&app, http(), &client_id, &client_secret, port).await?;
+    // Cancel any prior in-flight attempt (freeing the port) and register ours.
+    let cancel = Arc::new(Notify::new());
+    {
+        let mut guard = connect.0.lock().unwrap();
+        if let Some(prev) = guard.take() {
+            prev.notify_waiters();
+        }
+        *guard = Some(cancel.clone());
+    }
+
+    let result = oauth::authorize(&app, http(), &client_id, &client_secret, port, cancel.clone()).await;
+
+    // Clear our handle if it's still the current one.
+    {
+        let mut guard = connect.0.lock().unwrap();
+        if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &cancel)) {
+            *guard = None;
+        }
+    }
+    let tokens = result?;
 
     let profile = api_get(&tokens.access_token, &format!("{GMAIL}/profile")).await?;
     let email = profile["emailAddress"]
@@ -198,6 +224,13 @@ pub async fn gmail_status(
     match access_token(&app, &state).await {
         Ok(_) => Ok(Some(auth.email)),
         Err(_) => Ok(None),
+    }
+}
+
+#[tauri::command]
+pub fn gmail_cancel_connect(connect: State<'_, ConnectState>) {
+    if let Some(cancel) = connect.0.lock().unwrap().take() {
+        cancel.notify_waiters();
     }
 }
 

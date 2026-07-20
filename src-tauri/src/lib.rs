@@ -7,8 +7,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(gmail::AuthState::default())
+        .manage(gmail::ConnectState::default())
         .invoke_handler(tauri::generate_handler![
             gmail::gmail_connect,
+            gmail::gmail_cancel_connect,
             gmail::gmail_status,
             gmail::gmail_disconnect,
             gmail::gmail_search,

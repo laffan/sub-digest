@@ -9,11 +9,13 @@ use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::{timeout, Duration};
+use tokio::sync::Notify;
+use tokio::time::{sleep, timeout, Duration};
 
 pub const SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -34,6 +36,7 @@ pub async fn authorize(
     client_id: &str,
     client_secret: &str,
     port: u16,
+    cancel: Arc<Notify>,
 ) -> Result<TokenResponse, String> {
     let verifier = random_token(64);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -41,12 +44,7 @@ pub async fn authorize(
 
     // A fixed loopback port gives one stable redirect URI to register in the
     // Google Cloud Console, which is what Web-application OAuth clients require.
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-        format!(
-            "could not open loopback port {port}: {e}. Close any other running \
-             instance of Sub Digest, or set VITE_OAUTH_REDIRECT_PORT to a free port."
-        )
-    })?;
+    let listener = bind_with_retry(port).await?;
     let redirect_uri = format!("http://127.0.0.1:{port}");
 
     let mut auth_url = url::Url::parse(AUTH_URL).unwrap();
@@ -66,9 +64,17 @@ pub async fn authorize(
         .open_url(auth_url.as_str(), None::<&str>)
         .map_err(|e| format!("could not open browser: {e}"))?;
 
-    let code = timeout(Duration::from_secs(WAIT_SECS), wait_for_code(listener, &csrf))
-        .await
-        .map_err(|_| "timed out waiting for Google sign-in (5 minutes)".to_string())??;
+    // Race the redirect against an explicit cancel (e.g. the user aborting, or
+    // a fresh connect attempt) so a blocked sign-in that never redirects back
+    // doesn't hold the loopback port for the full timeout. Dropping
+    // `wait_for_code` on cancel releases the listener immediately.
+    let code = tokio::select! {
+        biased;
+        _ = cancel.notified() => return Err("sign-in cancelled".to_string()),
+        r = timeout(Duration::from_secs(WAIT_SECS), wait_for_code(listener, &csrf)) => {
+            r.map_err(|_| "timed out waiting for Google sign-in (5 minutes)".to_string())??
+        }
+    };
 
     let resp = http
         .post(TOKEN_URL)
@@ -100,6 +106,27 @@ pub async fn authorize(
         );
     }
     Ok(tokens)
+}
+
+/// Binds the fixed loopback port, briefly retrying so a just-cancelled prior
+/// attempt has a moment to release it before we give up.
+async fn bind_with_retry(port: u16) -> Result<TcpListener, String> {
+    let mut last = String::new();
+    for attempt in 0..8 {
+        match TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) => {
+                last = e.to_string();
+                if attempt < 7 {
+                    sleep(Duration::from_millis(150)).await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "could not open loopback port {port}: {last}. Close whatever is using \
+         it, or set VITE_OAUTH_REDIRECT_PORT to a free port."
+    ))
 }
 
 /// Accepts connections until one carries the OAuth redirect, then answers it.

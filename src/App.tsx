@@ -5,6 +5,7 @@ import { PostList } from "./components/PostList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Preview } from "./components/Preview";
 import {
+  gmailCancelConnect,
   gmailConnect,
   gmailDisconnect,
   gmailGetBody,
@@ -60,10 +61,15 @@ export default function App() {
     try {
       setAccount(await gmailConnect());
     } catch (e) {
-      setError(String(e));
+      // A user-initiated cancel isn't an error worth surfacing.
+      if (!/cancel/i.test(String(e))) setError(String(e));
     } finally {
       setConnecting(false);
     }
+  }, []);
+
+  const cancelConnect = useCallback(() => {
+    gmailCancelConnect().catch(() => {});
   }, []);
 
   const disconnect = useCallback(async () => {
@@ -166,6 +172,7 @@ export default function App() {
           account={account}
           connecting={connecting}
           onConnect={connect}
+          onCancel={cancelConnect}
           onDisconnect={disconnect}
         />
         {account && (

@@ -4,10 +4,11 @@ interface Props {
   account: string | null;
   connecting: boolean;
   onConnect: () => void;
+  onCancel: () => void;
   onDisconnect: () => void;
 }
 
-export function AuthPanel({ account, connecting, onConnect, onDisconnect }: Props) {
+export function AuthPanel({ account, connecting, onConnect, onCancel, onDisconnect }: Props) {
   if (account) {
     return (
       <section className="panel auth">
@@ -40,10 +41,23 @@ export function AuthPanel({ account, connecting, onConnect, onDisconnect }: Prop
           <button className="primary" disabled={connecting} onClick={onConnect}>
             {connecting ? "Waiting for Google…" : "Connect Gmail"}
           </button>
-          <p className="hint">
-            Sign-in opens in your browser. Access is read-only and tokens stay on this
-            device.
-          </p>
+          {connecting ? (
+            <>
+              <button className="link" onClick={onCancel}>
+                Cancel
+              </button>
+              <p className="hint">
+                Complete sign-in in your browser. If Google shows{" "}
+                <strong>access_denied</strong>, add your address as a Test user on the
+                OAuth consent screen, then Cancel and try again.
+              </p>
+            </>
+          ) : (
+            <p className="hint">
+              Sign-in opens in your browser. Access is read-only and tokens stay on this
+              device.
+            </p>
+          )}
         </>
       )}
       <p className="hint redirect-hint">
