@@ -28,17 +28,21 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    - **PDF** — a custom layout engine flows the posts (publication name, title,
      date, and body text) into fixed pages, with images floated to alternating
      sides at up to half-column width so text wraps around them. An optional
-     cover carries the table of contents (each post with its page number), plus
-     page numbers and optional 2-up saddle-stitch imposition so you can print,
-     fold, and staple a booklet. The PDF's title is the date span of the
-     included posts.
+     cover carries a table of contents listing **every** post — title,
+     publication, date and page number, running onto further contents pages
+     when one isn't enough — and each entry is a clickable link to the page the
+     post starts on. Then page numbers, and optional 2-up saddle-stitch
+     imposition so you can print, fold, and staple a booklet (the contents
+     links are rebuilt on the imposed sheets, so they still work). The PDF's
+     title is the date span of the included posts.
    - **EPUB** — a reflowable EPUB 3 e-book, one chapter per post, with a
-     navigation document (plus a legacy NCX for older readers) so each post is
-     a table-of-contents entry. An optional title page opens the book. Page
-     size, margins, columns and type size belong to the reading device, so the
-     e-book leaves them to it; the font family and line height carry over as
-     the book's stylesheet. Text stays UTF-8, so emoji and CJK survive here
-     even though the PDF drops them.
+     navigation document (plus a legacy NCX for older readers) listing every
+     post with its publication and date, so the whole digest is one tap away in
+     the reader's contents. An optional title page opens the book, followed by
+     the contents page itself. Page size, margins, columns and type size belong
+     to the reading device, so the e-book leaves them to it; the font family
+     and line height carry over as the book's stylesheet. Text stays UTF-8, so
+     emoji and CJK survive here even though the PDF drops them.
 
 The window has three columns: account + discovered posts on the left, output
 format and its settings in the middle, and a live preview on the right — the
@@ -192,7 +196,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
 | Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for hard-to-parse newsletters; returns Markdown. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs). API key set in Settings; runs in Rust (no CORS) |
-| PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, TOC cover, saddle-stitch imposition — built on pdf-lib |
+| PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib |
 | EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |

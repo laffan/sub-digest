@@ -1,5 +1,5 @@
 import { strToU8, zipSync, type Zippable } from "fflate";
-import { dateRangeLabel, formatLongDate, isoDay } from "../dates";
+import { dateRangeLabel, formatLongDate, formatShortDate, isoDay } from "../dates";
 import { prepareImage } from "../images";
 import type { DigestPost, GeneratedOutput, LayoutSettings } from "../types";
 import { blocksToXhtml, epubCss, esc, xhtmlDocument, type ImageResolver } from "./xhtml";
@@ -173,11 +173,33 @@ function coverBody(posts: DigestPost[], range: string, publicationCount: number)
   ].join("\n");
 }
 
+/**
+ * The list of contents entries — one per post, never abridged. The publication
+ * and date ride *inside* the entry: a nav `li` may hold only a single `a`/`span`
+ * (plus a nested list), so they can't be siblings of the link.
+ *
+ * `hrefFor` returns null for the preview copy, which renders each entry as a
+ * span instead: a fragment link inside the preview's sandboxed `srcdoc` frame
+ * reloads it blank rather than scrolling.
+ */
+function tocList(chapters: Chapter[], hrefFor: (ch: Chapter) => string | null): string {
+  const items = chapters
+    .map((ch) => {
+      const href = hrefFor(ch);
+      const [open, close] = href === null ? ["<span>", "</span>"] : [`<a href="${esc(href)}">`, "</a>"];
+      return (
+        `    <li>${open}<span class="toc-title">${esc(ch.title)}</span>` +
+        `<span class="toc-meta">${esc(
+          `${ch.post.publication}  ·  ${formatShortDate(ch.post.dateMs)}`
+        )}</span>${close}</li>`
+      );
+    })
+    .join("\n");
+  return `  <ol>\n${items}\n  </ol>`;
+}
+
 /** The EPUB 3 navigation document: the reader's table of contents. */
 function navBody(chapters: Chapter[], hasCover: boolean): string {
-  const items = chapters
-    .map((ch) => `    <li><a href="${ch.file}">${esc(ch.title)}</a></li>`)
-    .join("\n");
   const landmarks = [
     ...(hasCover ? [`    <li><a epub:type="cover" href="cover.xhtml">Cover</a></li>`] : []),
     `    <li><a epub:type="toc" href="nav.xhtml">Contents</a></li>`,
@@ -188,9 +210,7 @@ function navBody(chapters: Chapter[], hasCover: boolean): string {
 
   return `<nav epub:type="toc" id="toc">
   <h1>Contents</h1>
-  <ol>
-${items}
-  </ol>
+${tocList(chapters, (ch) => ch.file)}
 </nav>
 <nav epub:type="landmarks" id="landmarks" hidden="hidden">
   <h2>Landmarks</h2>
@@ -300,8 +320,14 @@ function previewDocument(
   const dataUrls = new Map<string, string>();
   for (const [src, img] of images) dataUrls.set(src, jpegDataUrl(img.jpeg));
 
+  // The contents page is part of the book, so the preview shows it too.
+  const contents = coverHtml
+    ? `<nav id="toc">\n  <h1>Contents</h1>\n${tocList(chapters, () => null)}\n</nav>`
+    : null;
+
   const sheets = [
     ...(coverHtml ? [coverHtml] : []),
+    ...(contents ? [contents] : []),
     ...chapters.map((ch) =>
       chapterBody(ch.post, `preview-${ch.id}`, (src) => dataUrls.get(src) ?? null)
     ),

@@ -1,7 +1,11 @@
 import {
+  PDFArray,
+  PDFDict,
   PDFDocument,
   PDFFont,
   PDFImage,
+  PDFName,
+  PDFNumber,
   PDFPage,
   StandardFonts,
   rgb,
@@ -53,8 +57,8 @@ export async function generatePdf(
   const fonts = await embedFonts(doc, settings);
   const flow = new Flow(doc, settings, fonts);
 
-  // Content is laid out first so the cover's table of contents can point at
-  // real page numbers; the cover is inserted in front afterwards.
+  // Content is laid out first so the table of contents can point at real page
+  // numbers; the front matter is inserted ahead of it afterwards.
   const toc: TocEntry[] = [];
   for (let i = 0; i < sorted.length; i++) {
     const post = sorted[i];
@@ -66,7 +70,7 @@ export async function generatePdf(
   flow.drawFooters(sorted);
 
   if (settings.coverPage && sorted.length > 0) {
-    drawCover(doc, flow, toc, sorted);
+    drawFrontMatter(doc, flow, toc, sorted);
   }
 
   if (settings.bookletImposition) {
@@ -436,9 +440,25 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
   flow.ensureStarted();
   flow.clearFloat(); // a prior post's float never carries into this one
 
-  // Keep the header together: publication + title + date + a couple of lines
-  const headerEstimate = body * 6;
-  flow.fit(headerEstimate);
+  // Keep the header together. This has to measure the real wrapped height, not
+  // guess: if the title spilled into the next column the page recorded below
+  // would be the one holding a stranded publication line, and the table of
+  // contents would send readers a page early.
+  const pubSize = body * 0.78;
+  const titleSize = body * 1.55;
+  const pub = sanitize(post.publication.toUpperCase());
+  const pubLines = wrapText(pub, flow.fonts.bold, pubSize, flow.colW);
+  const titleLines = wrapText(sanitize(post.title), flow.fonts.bold, titleSize, flow.colW);
+  const headerHeight =
+    body * 2.6 + // separator rule and the space around it
+    Math.max(pubLines.length, 1) * pubSize * 1.15 +
+    body * 0.35 +
+    Math.max(titleLines.length, 1) * titleSize * 1.12 +
+    body * 0.35 +
+    body * 0.82 * 1.15 + // date
+    body * 0.9 +
+    body * s.lineHeight * 2; // and enough body text that the header isn't stranded
+  flow.fit(headerHeight);
   const startPage = flow.pageNumber;
 
   // Separator above subsequent posts in the same column
@@ -568,7 +588,7 @@ async function layoutBlock(flow: Flow, block: Block, s: LayoutSettings) {
 }
 
 // ---------------------------------------------------------------------------
-// Cover: masthead + table of contents
+// Front matter: masthead + table of contents
 
 interface TocEntry {
   publication: string;
@@ -577,12 +597,36 @@ interface TocEntry {
   page: number;
 }
 
-function drawCover(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: DigestPost[]) {
-  const { pageW, pageH, fonts } = flow;
-  const page = doc.insertPage(0, [pageW, pageH]);
+/** A contents entry's clickable area, resolved to a real page once all
+ *  front-matter pages exist and the content's page offset is known. */
+interface PendingLink {
+  page: PDFPage;
+  rect: [number, number, number, number];
+  /** 1-based content page number, i.e. the number printed in the footer. */
+  target: number;
+}
 
+/**
+ * Draws the front matter ahead of the content: a masthead, then a table of
+ * contents listing *every* post — continuing onto as many pages as it needs —
+ * with each entry a clickable link to the page the post starts on.
+ */
+function drawFrontMatter(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: DigestPost[]) {
+  const { pageW, pageH, fonts } = flow;
   const margin = Math.max(pageW * 0.09, 34);
   const width = pageW - margin * 2;
+  const bottom = Math.max(pageH * 0.07, 30);
+  const titleSize = Math.min(10.5, Math.max(8.5, pageH / 60));
+  const metaSize = titleSize * 0.78;
+  const pageNumW = fonts.bold.widthOfTextAtSize("000", titleSize) + 8;
+  const titleW = width - pageNumW;
+  const topY = pageH - Math.max(pageH * 0.1, 44);
+
+  // Front matter goes ahead of the content, so the nth page inserts at index n.
+  let frontCount = 0;
+  const addFrontPage = (): PDFPage => doc.insertPage(frontCount++, [pageW, pageH]);
+
+  let page = addFrontPage();
   const center = (text: string, y: number, font: PDFFont, size: number, color = INK) => {
     const t = sanitize(text);
     page.drawText(t, {
@@ -595,49 +639,52 @@ function drawCover(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: DigestP
   };
 
   // Masthead
-  const mastY = pageH - Math.max(pageH * 0.1, 44);
-  center("S U B S T A C K", mastY + 26, fonts.regular, 9, MUTED);
-  center("Digest", mastY, fonts.bold, 34);
+  center("S U B S T A C K", topY + 26, fonts.regular, 9, MUTED);
+  center("Digest", topY, fonts.bold, 34);
   page.drawLine({
-    start: { x: margin, y: mastY - 14 },
-    end: { x: pageW - margin, y: mastY - 14 },
+    start: { x: margin, y: topY - 14 },
+    end: { x: pageW - margin, y: topY - 14 },
     thickness: 1,
     color: INK,
   });
   const pubs = [...new Set(posts.map((p) => p.publication))];
   const subtitle = `${dateRangeLabel(posts)}   ·   ${posts.length} post${posts.length === 1 ? "" : "s"} from ${pubs.length} publication${pubs.length === 1 ? "" : "s"}`;
-  center(subtitle, mastY - 30, fonts.italic, 9, MUTED);
+  center(subtitle, topY - 30, fonts.italic, 9, MUTED);
+
+  /** Starts a continuation page and returns the y to resume the list at. */
+  const continuePage = (): number => {
+    page = addFrontPage();
+    page.drawText(sanitize("Contents, continued"), {
+      x: margin,
+      y: topY,
+      size: metaSize,
+      font: fonts.italic,
+      color: MUTED,
+    });
+    page.drawLine({
+      start: { x: margin, y: topY - 10 },
+      end: { x: pageW - margin, y: topY - 10 },
+      thickness: 0.6,
+      color: RULE,
+    });
+    return topY - 10 - titleSize * 1.4;
+  };
 
   // Contents
-  let y = mastY - 64;
-  const bottom = Math.max(pageH * 0.07, 30);
-  const titleSize = Math.min(10.5, Math.max(8.5, pageH / 60));
-  const metaSize = titleSize * 0.78;
-  const pageNumW = fonts.bold.widthOfTextAtSize("000", titleSize) + 8;
-  const titleW = width - pageNumW;
+  const links: PendingLink[] = [];
+  let y = topY - 64;
+  let pageIsEmpty = false; // an entry taller than a page has to overflow somewhere
 
-  for (let i = 0; i < toc.length; i++) {
-    const entry = toc[i];
-    const title = sanitize(entry.title);
-    let lines = wrapText(title, fonts.bold, titleSize, titleW);
-    if (lines.length > 2) {
-      lines = lines.slice(0, 2);
-      lines[1] = truncateToWidth(`${lines[1]}…`, fonts.bold, titleSize, titleW);
-    }
+  for (const entry of toc) {
+    // Titles wrap as far as they need to; the list flows onto another page
+    // rather than cutting the digest's contents short.
+    const lines = wrapText(sanitize(entry.title) || "(untitled)", fonts.bold, titleSize, titleW);
     const entryH = lines.length * titleSize * 1.25 + metaSize * 1.5 + titleSize * 0.9;
-
-    // Out of room: summarize the rest instead of overflowing
-    if (y - entryH < bottom) {
-      const rest = toc.length - i;
-      page.drawText(sanitize(`+ ${rest} more post${rest === 1 ? "" : "s"} inside`), {
-        x: margin,
-        y: Math.max(y - titleSize * 1.4, bottom),
-        size: metaSize,
-        font: fonts.italic,
-        color: MUTED,
-      });
-      break;
+    if (y - entryH < bottom && !pageIsEmpty) {
+      y = continuePage();
+      pageIsEmpty = true;
     }
+    const entryTop = y;
 
     // Title lines, with the page number and dot leader on the first line
     for (let l = 0; l < lines.length; l++) {
@@ -676,8 +723,38 @@ function drawCover(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: DigestP
       font: fonts.italic,
       color: MUTED,
     });
+    links.push({
+      page,
+      rect: [margin, y - metaSize * 0.35, pageW - margin, entryTop],
+      target: entry.page,
+    });
     y -= titleSize * 0.9;
+    pageIsEmpty = false;
   }
+
+  // Content pages sit after the front matter, so a post that prints page n is
+  // the document's (frontCount + n - 1)th page.
+  for (const link of links) {
+    addInternalLink(doc, link.page, link.rect, doc.getPage(frontCount + link.target - 1));
+  }
+}
+
+/** Turns `rect` on `page` into a click target that jumps to `target`'s top. */
+function addInternalLink(
+  doc: PDFDocument,
+  page: PDFPage,
+  rect: [number, number, number, number],
+  target: PDFPage
+) {
+  const annot = doc.context.obj({
+    Type: "Annot",
+    Subtype: "Link",
+    Rect: rect,
+    Border: [0, 0, 0], // the dot leader already reads as a link; no box drawn
+    F: 4, // print
+    Dest: [target.ref, "XYZ", null, target.getHeight(), null],
+  });
+  page.node.addAnnot(doc.context.register(annot));
 }
 
 function drawDotLeader(
@@ -724,9 +801,12 @@ async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<U
 
   const [pw, ph] = [src.getPage(0).getWidth(), src.getPage(0).getHeight()];
   const embedded = await out.embedPages(src.getPages());
+  // Where each 1-based source page ended up, so its links can be re-created.
+  const placed = new Map<number, { sheet: PDFPage; slot: 0 | 1 }>();
   const place = (sheet: PDFPage, pageNo: number, slot: 0 | 1) => {
     if (pageNo > embedded.length) return; // padding blank
     sheet.drawPage(embedded[pageNo - 1], { x: slot * pw, y: 0, width: pw, height: ph });
+    placed.set(pageNo, { sheet, slot });
   };
 
   // Side s (1-indexed): odd sides put the high page on the left
@@ -742,6 +822,56 @@ async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<U
       place(sheet, high, 1);
     }
   }
+
+  reLinkImposedSheets(src, out, placed, pw, ph);
   return out.save();
+}
+
+/**
+ * Rebuilds the contents' links on the imposed sheets. Embedding a page turns
+ * it into a form XObject, which leaves its annotations behind — so each link is
+ * re-created at its page's new offset, pointing at whichever sheet now carries
+ * its destination.
+ */
+function reLinkImposedSheets(
+  src: PDFDocument,
+  out: PDFDocument,
+  placed: Map<number, { sheet: PDFPage; slot: 0 | 1 }>,
+  pw: number,
+  ph: number
+) {
+  const pageNoOfRef = new Map<string, number>();
+  src.getPages().forEach((p, i) => pageNoOfRef.set(p.ref.toString(), i + 1));
+
+  src.getPages().forEach((page, i) => {
+    const annots = page.node.Annots();
+    const from = placed.get(i + 1);
+    if (!annots || !from) return;
+
+    for (let a = 0; a < annots.size(); a++) {
+      const dict = src.context.lookupMaybe(annots.get(a), PDFDict);
+      if (!dict || dict.get(PDFName.of("Subtype")) !== PDFName.of("Link")) continue;
+      const rect = src.context.lookupMaybe(dict.get(PDFName.of("Rect")), PDFArray);
+      const dest = src.context.lookupMaybe(dict.get(PDFName.of("Dest")), PDFArray);
+      if (!rect || rect.size() < 4 || !dest || dest.size() < 1) continue;
+
+      const to = placed.get(pageNoOfRef.get(dest.get(0).toString()) ?? 0);
+      if (!to) continue;
+
+      const [x0, y0, x1, y1] = [0, 1, 2, 3].map((k) =>
+        (src.context.lookupMaybe(rect.get(k), PDFNumber) ?? PDFNumber.of(0)).asNumber()
+      );
+      const dx = from.slot * pw;
+      const annot = out.context.obj({
+        Type: "Annot",
+        Subtype: "Link",
+        Rect: [x0 + dx, y0, x1 + dx, y1],
+        Border: [0, 0, 0],
+        F: 4,
+        Dest: [to.sheet.ref, "XYZ", to.slot * pw, ph, null],
+      });
+      from.sheet.node.addAnnot(out.context.register(annot));
+    }
+  });
 }
 

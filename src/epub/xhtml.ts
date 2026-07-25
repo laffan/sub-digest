@@ -267,7 +267,20 @@ hr.rule {
 /* Table of contents */
 nav h1 { font-size: 1.4em; margin: 0 0 0.8em; }
 nav ol { list-style: none; margin: 0; padding: 0; }
-nav li { margin-bottom: 0.6em; }
-nav a { text-decoration: none; }
+nav li { margin-bottom: 0.7em; }
+/* The whole entry is the link, so it should read as contents, not as a link. */
+nav a { text-decoration: none; color: inherit; }
+
+.toc-title {
+  display: block;
+  font-weight: bold;
+}
+
+.toc-meta {
+  display: block;
+  font-style: italic;
+  font-size: 0.82em;
+  color: #6b6b73;
+}
 `;
 }
