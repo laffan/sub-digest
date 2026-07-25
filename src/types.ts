@@ -28,7 +28,16 @@ export interface AgentConfig {
 export type FontFamily = "Helvetica" | "Times" | "Courier";
 export type PageSizeName = "A5" | "HalfLetter" | "A4" | "Letter";
 
+/** Which file Generate produces. */
+export type ExportFormat = "pdf" | "epub";
+
+/**
+ * Output settings. The page-geometry fields (size, margins, columns, page
+ * numbers, imposition) only apply to PDF; EPUB is reflowable and honours the
+ * shared fields: `font`, `lineHeight`, `includeImages` and `coverPage`.
+ */
 export interface LayoutSettings {
+  format: ExportFormat;
   pageSize: PageSizeName;
   /** millimetres */
   marginTop: number;
@@ -51,6 +60,7 @@ export interface LayoutSettings {
 }
 
 export const DEFAULT_SETTINGS: LayoutSettings = {
+  format: "pdf",
   pageSize: "A5",
   marginTop: 14,
   marginBottom: 16,
@@ -83,9 +93,23 @@ export interface DigestPost {
   blocks: Block[];
 }
 
-/** An image already decoded and re-encoded as JPEG for pdf-lib. */
+/** An image already decoded and re-encoded as JPEG for embedding. */
 export interface PreparedImage {
   jpeg: Uint8Array;
   width: number;
   height: number;
+}
+
+/**
+ * A generated digest, ready to preview and save. EPUB carries a standalone
+ * HTML rendering of the book alongside the archive, since the preview pane
+ * can't open the archive itself.
+ */
+export type GeneratedOutput =
+  | { format: "pdf"; bytes: Uint8Array }
+  | { format: "epub"; bytes: Uint8Array; previewHtml: string };
+
+/** Default file name (sans directory) for saving a generated digest. */
+export function outputFileName(format: ExportFormat): string {
+  return `substack-digest.${format}`;
 }

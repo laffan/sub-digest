@@ -8,7 +8,8 @@ import {
   type RGB,
 } from "pdf-lib";
 import type { Block, DigestPost, LayoutSettings, PageSizeName, PreparedImage } from "../types";
-import { prepareImage } from "./images";
+import { prepareImage } from "../images";
+import { dateRangeLabel, formatLongDate } from "../dates";
 
 const MM = 72 / 25.4; // millimetres → points
 
@@ -465,7 +466,7 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
     spaceAfter: body * 0.35,
     lineHeight: 1.12,
   });
-  drawParagraph(flow, formatDate(post.dateMs), {
+  drawParagraph(flow, formatLongDate(post.dateMs), {
     font: flow.fonts.italic,
     size: body * 0.82,
     color: MUTED,
@@ -744,23 +745,3 @@ async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<U
   return out.save();
 }
 
-// ---------------------------------------------------------------------------
-
-function formatDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-}
-
-export function dateRangeLabel(posts: DigestPost[]): string {
-  if (posts.length === 0) return "";
-  const times = posts.map((p) => p.dateMs);
-  const fmt = (ms: number) =>
-    new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-  const lo = fmt(Math.min(...times));
-  const hi = fmt(Math.max(...times));
-  return lo === hi ? lo : `${lo} – ${hi}`;
-}

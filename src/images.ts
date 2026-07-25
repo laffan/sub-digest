@@ -1,5 +1,5 @@
-import { fetchImageB64 } from "../gmail";
-import type { PreparedImage } from "../types";
+import { fetchImageB64 } from "./gmail";
+import type { PreparedImage } from "./types";
 
 const MAX_PX = 1400;
 

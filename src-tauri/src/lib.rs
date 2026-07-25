@@ -30,7 +30,7 @@ pub fn run() {
             gmail::gmail_search,
             gmail::gmail_get_body,
             gmail::fetch_image,
-            gmail::save_pdf,
+            gmail::save_file,
             anthropic::anthropic_test,
             anthropic::anthropic_process,
         ])

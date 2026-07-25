@@ -516,10 +516,11 @@ pub async fn fetch_image(image_url: String) -> Result<String, String> {
     Ok(STANDARD.encode(&bytes))
 }
 
+/// Writes a generated document (PDF or EPUB) to a user-chosen path.
 #[tauri::command]
-pub async fn save_pdf(path: String, bytes_b64: String) -> Result<(), String> {
+pub async fn save_file(path: String, bytes_b64: String) -> Result<(), String> {
     let bytes = STANDARD
         .decode(bytes_b64)
-        .map_err(|e| format!("bad pdf payload: {e}"))?;
+        .map_err(|e| format!("bad document payload: {e}"))?;
     std::fs::write(&path, bytes).map_err(|e| format!("could not write {path}: {e}"))
 }

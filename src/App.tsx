@@ -16,14 +16,17 @@ import {
   gmailSearch,
   gmailStatus,
   publicationFromHeader,
-  savePdf,
+  saveFile,
 } from "./gmail";
 import { parseEmailHtml, parsePlainText } from "./parse";
 import { generatePdf } from "./pdf/layout";
+import { generateEpub } from "./epub/build";
 import {
   DEFAULT_SETTINGS,
+  outputFileName,
   type AgentConfig,
   type DigestPost,
+  type GeneratedOutput,
   type LayoutSettings,
   type Post,
 } from "./types";
@@ -84,7 +87,7 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
+  const [output, setOutput] = useState<GeneratedOutput | null>(null);
 
   // Fetched email bodies, cached by message id so re-generating is instant.
   const bodyCache = useRef(new Map<string, string>());
@@ -106,6 +109,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(AGENTS_KEY, JSON.stringify(agentConfigs));
   }, [agentConfigs]);
+
+  // Switching format leaves the preview showing the other format's document.
+  useEffect(() => {
+    setOutput(null);
+  }, [settings.format]);
 
   const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
@@ -147,7 +155,7 @@ export default function App() {
     await gmailDisconnect().catch(() => {});
     setAccount(null);
     setPosts([]);
-    setPdfBytes(null);
+    setOutput(null);
   }, []);
 
   const scan = useCallback(async () => {
@@ -222,8 +230,11 @@ export default function App() {
           blocks,
         });
       }
-      const bytes = await generatePdf(digest, settings, setProgress);
-      setPdfBytes(bytes);
+      if (settings.format === "epub") {
+        setOutput(await generateEpub(digest, settings, setProgress));
+      } else {
+        setOutput({ format: "pdf", bytes: await generatePdf(digest, settings, setProgress) });
+      }
       setProgress("");
     } catch (e) {
       setError(String(e));
@@ -232,24 +243,25 @@ export default function App() {
     }
   }, [posts, settings, agentConfigs, anthropicKey]);
 
-  const exportPdf = useCallback(async () => {
-    if (!pdfBytes) return;
+  const exportOutput = useCallback(async () => {
+    if (!output) return;
+    const ext = output.format;
     const path = await save({
-      defaultPath: "substack-digest.pdf",
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
+      defaultPath: outputFileName(ext),
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
     });
     if (!path) return;
     let bin = "";
     const chunk = 0x8000;
-    for (let i = 0; i < pdfBytes.length; i += chunk) {
-      bin += String.fromCharCode(...pdfBytes.subarray(i, i + chunk));
+    for (let i = 0; i < output.bytes.length; i += chunk) {
+      bin += String.fromCharCode(...output.bytes.subarray(i, i + chunk));
     }
     try {
-      await savePdf(path, btoa(bin));
+      await saveFile(path, btoa(bin));
     } catch (e) {
       setError(String(e));
     }
-  }, [pdfBytes]);
+  }, [output]);
 
   return (
     <div className="app">
@@ -289,7 +301,7 @@ export default function App() {
       </aside>
 
       <aside className="col col-mid">
-        <h2 className="col-title">PDF Settings</h2>
+        <h2 className="col-title">Output</h2>
         <SettingsPanel settings={settings} onChange={setSettings} />
         <div className="generate-area">
           <button
@@ -299,9 +311,9 @@ export default function App() {
           >
             {generating ? "Generating…" : `Generate (${selectedCount} posts)`}
           </button>
-          {pdfBytes && !generating && (
-            <button className="secondary" onClick={exportPdf}>
-              Save PDF…
+          {output && !generating && (
+            <button className="secondary" onClick={exportOutput}>
+              {`Save ${output.format.toUpperCase()}…`}
             </button>
           )}
           {progress && <div className="progress">{progress}</div>}
@@ -310,7 +322,7 @@ export default function App() {
       </aside>
 
       <main className="col col-preview">
-        <Preview pdfBytes={pdfBytes} />
+        <Preview output={output} />
       </main>
 
       {showSettings && (

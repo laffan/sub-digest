@@ -2,7 +2,7 @@
 
 A [Tauri 2](https://v2.tauri.app) app for macOS and iPadOS that turns the
 Substack newsletters in your Gmail inbox into a printable PDF booklet — a
-little magazine of your recent reading.
+little magazine of your recent reading — or an EPUB for your e-reader.
 
 ## What it does
 
@@ -22,18 +22,27 @@ little magazine of your recent reading.
    Settings), flagged newsletters are reformatted by the agent, which can also
    **fetch a linked page and extract specific DIVs** to pull in just the content
    it needs without spending tokens on whole pages.
-4. **Generate** — a custom layout engine flows the posts (publication name,
-   title, date, and body text) in chronological order into a PDF, with images
-   floated to alternating sides at up to half-column width so text wraps around
-   them. An optional cover carries the table of contents (each post with its
-   page number), plus page numbers and optional 2-up saddle-stitch imposition
-   so you can print, fold, and staple a booklet. The PDF's title is the date
-   span of the included posts.
+4. **Generate** — pick **PDF** or **EPUB** at the top of the middle column;
+   both take the same posts in the same chronological order.
 
-The window has three columns: account + discovered posts on the left, PDF
-settings (page size, margins, columns, font, font size, line height, images,
-imposition) in the middle, and a live preview of the generated PDF on the
-right.
+   - **PDF** — a custom layout engine flows the posts (publication name, title,
+     date, and body text) into fixed pages, with images floated to alternating
+     sides at up to half-column width so text wraps around them. An optional
+     cover carries the table of contents (each post with its page number), plus
+     page numbers and optional 2-up saddle-stitch imposition so you can print,
+     fold, and staple a booklet. The PDF's title is the date span of the
+     included posts.
+   - **EPUB** — a reflowable EPUB 3 e-book, one chapter per post, with a
+     navigation document (plus a legacy NCX for older readers) so each post is
+     a table-of-contents entry. An optional title page opens the book. Page
+     size, margins, columns and type size belong to the reading device, so the
+     e-book leaves them to it; the font family and line height carry over as
+     the book's stylesheet. Text stays UTF-8, so emoji and CJK survive here
+     even though the PDF drops them.
+
+The window has three columns: account + discovered posts on the left, output
+format and its settings in the middle, and a live preview on the right — the
+real generated PDF, or the EPUB's own markup and stylesheet for e-books.
 
 ## Setup
 
@@ -116,7 +125,8 @@ iOS sign-in is implemented: instead of the desktop loopback redirect, the app
 uses a **custom URL scheme** that iOS routes back into the app via
 `tauri-plugin-deep-link`. The backend (`src-tauri/src/gmail.rs`) picks the iOS
 flow automatically when running on iOS — the shared PKCE core, token
-storage/refresh, Gmail API, parser, and PDF engine are identical to desktop.
+storage/refresh, Gmail API, parser, and both export engines are identical to
+desktop.
 
 Building for iPad needs a Mac with Xcode:
 
@@ -162,8 +172,8 @@ Three iOS-specific setup steps (done once, on the Mac):
    scheme, set both the plist entry and the env var to
    `com.googleusercontent.apps.<your-ios-client-id>`.
 
-3. **"Save PDF…"** uses `tauri-plugin-dialog`, which presents the iOS document
-   picker — no extra work.
+3. **"Save PDF…" / "Save EPUB…"** uses `tauri-plugin-dialog`, which presents
+   the iOS document picker — no extra work.
 
 The loopback flow still works in the **iPad simulator**, so you can develop the
 whole app there before wiring the iOS client for on-device/TestFlight builds.
@@ -182,12 +192,16 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
 | Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for hard-to-parse newsletters; returns Markdown. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs). API key set in Settings; runs in Rust (no CORS) |
-| Layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, TOC cover, saddle-stitch imposition — built on pdf-lib |
-| Image pipeline | `src/pdf/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG |
-| Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js |
+| PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, TOC cover, saddle-stitch imposition — built on pdf-lib |
+| EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
+| EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
+| Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |
+| Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
 
 Generated PDFs use the PDF standard fonts (Times, Helvetica, Courier), so
 files stay small; text outside WinAnsi (emoji, CJK) is dropped from output.
+EPUBs are UTF-8 and name font *families* rather than embedding fonts, so
+nothing is dropped and the files stay small too.
 
 ## Troubleshooting sign-in
 

@@ -1,14 +1,33 @@
 import { useEffect, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import type { GeneratedOutput } from "../types";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
 interface Props {
-  pdfBytes: Uint8Array | null;
+  output: GeneratedOutput | null;
 }
 
-export function Preview({ pdfBytes }: Props) {
+export function Preview({ output }: Props) {
+  return (
+    <div className="preview-wrap">
+      {!output && (
+        <div className="preview-empty">
+          <p>Nothing generated yet</p>
+          <p className="hint">
+            Connect Gmail, scan for posts, pick the ones you want, then hit Generate.
+          </p>
+        </div>
+      )}
+      {output?.format === "pdf" && <PdfPreview bytes={output.bytes} />}
+      {output?.format === "epub" && <EpubPreview html={output.previewHtml} />}
+    </div>
+  );
+}
+
+/** Renders the actual generated PDF, page by page, with pdf.js. */
+function PdfPreview({ bytes }: { bytes: Uint8Array }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [rendering, setRendering] = useState(false);
   const renderToken = useRef(0);
@@ -18,16 +37,11 @@ export function Preview({ pdfBytes }: Props) {
     if (!container) return;
     const token = ++renderToken.current;
 
-    if (!pdfBytes) {
-      container.innerHTML = "";
-      return;
-    }
-
     (async () => {
       setRendering(true);
       try {
         // pdf.js transfers the buffer to its worker, so hand it a copy
-        const doc = await pdfjs.getDocument({ data: pdfBytes.slice() }).promise;
+        const doc = await pdfjs.getDocument({ data: bytes.slice() }).promise;
         if (token !== renderToken.current) return;
         container.innerHTML = "";
 
@@ -58,20 +72,23 @@ export function Preview({ pdfBytes }: Props) {
         if (token === renderToken.current) setRendering(false);
       }
     })();
-  }, [pdfBytes]);
+  }, [bytes]);
 
   return (
-    <div className="preview-wrap">
-      {!pdfBytes && (
-        <div className="preview-empty">
-          <p>No PDF yet</p>
-          <p className="hint">
-            Connect Gmail, scan for posts, pick the ones you want, then hit Generate.
-          </p>
-        </div>
-      )}
+    <>
       {rendering && <div className="preview-rendering">Rendering preview…</div>}
       <div ref={containerRef} className="preview-pages" />
-    </div>
+    </>
+  );
+}
+
+/**
+ * Shows the EPUB's own markup and stylesheet in a sandboxed frame — the book
+ * reflows, so there are no fixed pages to rasterise. Scripting is disabled;
+ * the document is generated locally and only needs to render.
+ */
+function EpubPreview({ html }: { html: string }) {
+  return (
+    <iframe className="preview-epub" title="EPUB preview" sandbox="" srcDoc={html} />
   );
 }

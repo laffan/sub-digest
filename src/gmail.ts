@@ -52,8 +52,9 @@ export function fetchImageB64(imageUrl: string): Promise<string> {
   return invoke<string>("fetch_image", { imageUrl });
 }
 
-export function savePdf(path: string, bytesB64: string): Promise<void> {
-  return invoke<void>("save_pdf", { path, bytesB64 });
+/** Writes a generated document (PDF or EPUB) to a path the user picked. */
+export function saveFile(path: string, bytesB64: string): Promise<void> {
+  return invoke<void>("save_file", { path, bytesB64 });
 }
 
 /** Extracts a human publication name from a From header. */

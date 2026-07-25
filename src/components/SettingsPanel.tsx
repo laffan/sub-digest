@@ -1,4 +1,4 @@
-import type { FontFamily, LayoutSettings, PageSizeName } from "../types";
+import type { ExportFormat, FontFamily, LayoutSettings, PageSizeName } from "../types";
 
 interface Props {
   settings: LayoutSettings;
@@ -10,6 +10,11 @@ const PAGE_SIZES: { value: PageSizeName; label: string }[] = [
   { value: "HalfLetter", label: "Half Letter (5.5 × 8.5 in)" },
   { value: "A4", label: "A4 (210 × 297 mm)" },
   { value: "Letter", label: "Letter (8.5 × 11 in)" },
+];
+
+const FORMATS: { value: ExportFormat; label: string; hint: string }[] = [
+  { value: "pdf", label: "PDF", hint: "Fixed pages, printable booklet" },
+  { value: "epub", label: "EPUB", hint: "Reflowable e-book for readers" },
 ];
 
 const FONTS: FontFamily[] = ["Times", "Helvetica", "Courier"];
@@ -25,90 +30,128 @@ export function SettingsPanel({ settings, onChange }: Props) {
       if (!Number.isNaN(v)) set(key, Math.min(max, Math.max(min, v)) as LayoutSettings[K]);
     };
 
+  const isPdf = settings.format === "pdf";
+
   return (
     <div className="settings">
-      <fieldset>
-        <legend>Page</legend>
-        <label>
-          Size
-          <select
-            value={settings.pageSize}
-            onChange={(e) => set("pageSize", e.target.value as PageSizeName)}
+      <div className="format-toggle" role="group" aria-label="Export format">
+        {FORMATS.map((f) => (
+          <button
+            key={f.value}
+            type="button"
+            title={f.hint}
+            aria-pressed={settings.format === f.value}
+            onClick={() => set("format", f.value)}
           >
-            {PAGE_SIZES.map((p) => (
-              <option key={p.value} value={p.value}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={settings.bookletImposition}
-            onChange={(e) => set("bookletImposition", e.target.checked)}
-          />
-          Booklet imposition (2-up, saddle stitch)
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={settings.coverPage}
-            onChange={(e) => set("coverPage", e.target.checked)}
-          />
-          Cover with table of contents
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={settings.pageNumbers}
-            onChange={(e) => set("pageNumbers", e.target.checked)}
-          />
-          Page numbers
-        </label>
-      </fieldset>
+            {f.label}
+          </button>
+        ))}
+      </div>
 
-      <fieldset>
-        <legend>Margins (mm)</legend>
-        <div className="grid2">
+      {isPdf ? (
+        <fieldset>
+          <legend>Page</legend>
           <label>
-            Top
-            <input type="number" min={4} max={40} value={settings.marginTop} onChange={num("marginTop", 4, 40)} />
-          </label>
-          <label>
-            Bottom
-            <input type="number" min={4} max={40} value={settings.marginBottom} onChange={num("marginBottom", 4, 40)} />
-          </label>
-          <label>
-            Left
-            <input type="number" min={4} max={40} value={settings.marginLeft} onChange={num("marginLeft", 4, 40)} />
-          </label>
-          <label>
-            Right
-            <input type="number" min={4} max={40} value={settings.marginRight} onChange={num("marginRight", 4, 40)} />
-          </label>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Columns</legend>
-        <div className="grid2">
-          <label>
-            Count
+            Size
             <select
-              value={settings.columns}
-              onChange={(e) => set("columns", Number(e.target.value) as 1 | 2)}
+              value={settings.pageSize}
+              onChange={(e) => set("pageSize", e.target.value as PageSizeName)}
             >
-              <option value={1}>1</option>
-              <option value={2}>2</option>
+              {PAGE_SIZES.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
             </select>
           </label>
-          <label>
-            Gap (mm)
-            <input type="number" min={2} max={20} value={settings.columnGap} onChange={num("columnGap", 2, 20)} />
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={settings.bookletImposition}
+              onChange={(e) => set("bookletImposition", e.target.checked)}
+            />
+            Booklet imposition (2-up, saddle stitch)
           </label>
-        </div>
-      </fieldset>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={settings.coverPage}
+              onChange={(e) => set("coverPage", e.target.checked)}
+            />
+            Cover with table of contents
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={settings.pageNumbers}
+              onChange={(e) => set("pageNumbers", e.target.checked)}
+            />
+            Page numbers
+          </label>
+        </fieldset>
+      ) : (
+        <fieldset>
+          <legend>Book</legend>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={settings.coverPage}
+              onChange={(e) => set("coverPage", e.target.checked)}
+            />
+            Title page and contents
+          </label>
+          <p className="hint">
+            One chapter per post. Pages, margins and type size belong to the reading
+            device, so the e-book leaves them to it.
+          </p>
+        </fieldset>
+      )}
+
+      {isPdf && (
+        <fieldset>
+          <legend>Margins (mm)</legend>
+          <div className="grid2">
+            <label>
+              Top
+              <input type="number" min={4} max={40} value={settings.marginTop} onChange={num("marginTop", 4, 40)} />
+            </label>
+            <label>
+              Bottom
+              <input type="number" min={4} max={40} value={settings.marginBottom} onChange={num("marginBottom", 4, 40)} />
+            </label>
+            <label>
+              Left
+              <input type="number" min={4} max={40} value={settings.marginLeft} onChange={num("marginLeft", 4, 40)} />
+            </label>
+            <label>
+              Right
+              <input type="number" min={4} max={40} value={settings.marginRight} onChange={num("marginRight", 4, 40)} />
+            </label>
+          </div>
+        </fieldset>
+      )}
+
+      {isPdf && (
+        <fieldset>
+          <legend>Columns</legend>
+          <div className="grid2">
+            <label>
+              Count
+              <select
+                value={settings.columns}
+                onChange={(e) => set("columns", Number(e.target.value) as 1 | 2)}
+              >
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+              </select>
+            </label>
+            <label>
+              Gap (mm)
+              <input type="number" min={2} max={20} value={settings.columnGap} onChange={num("columnGap", 2, 20)} />
+            </label>
+          </div>
+        </fieldset>
+      )}
 
       <fieldset>
         <legend>Type</legend>
@@ -123,17 +166,19 @@ export function SettingsPanel({ settings, onChange }: Props) {
           </select>
         </label>
         <div className="grid2">
-          <label>
-            Size (pt)
-            <input
-              type="number"
-              min={7}
-              max={16}
-              step={0.5}
-              value={settings.fontSize}
-              onChange={num("fontSize", 7, 16)}
-            />
-          </label>
+          {isPdf && (
+            <label>
+              Size (pt)
+              <input
+                type="number"
+                min={7}
+                max={16}
+                step={0.5}
+                value={settings.fontSize}
+                onChange={num("fontSize", 7, 16)}
+              />
+            </label>
+          )}
           <label>
             Line height
             <input
