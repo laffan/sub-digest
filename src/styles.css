@@ -1121,6 +1121,17 @@ label.check {
   color: var(--muted);
 }
 
+.cp-figure {
+  margin: 0 0 10px;
+}
+
+.cp-figure img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 3px;
+}
+
 .cp-working {
   text-align: center;
   color: var(--muted);

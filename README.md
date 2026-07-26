@@ -27,7 +27,11 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    **the app fetches each one** and builds an entry out of the scraped text.
    Each linked article becomes its own entry, under its own title and byline,
    so a roundup arrives as the pieces it recommended rather than as the email
-   that listed them. Every word in the digest is scraped, never written, so the
+   that listed them. The scraper works out which part of each page holds the
+   body copy and takes only that, with its images, so an entry arrives close to
+   what you wanted rather than trailing a comment section and a subscribe box —
+   and the log names the container it read, so a page that comes out wrong tells
+   you which selector to pin in the instructions. Every word is scraped, never written, so the
    agent costs one short model call per newsletter rather than a minute of it
    retyping the articles. A newsletter with no article links is noted in the
    log and falls through to the normal parser.
@@ -64,8 +68,8 @@ three steps in order, each with a link back:
    address. **Drag** a row (by its grip, or from anywhere on it with a mouse)
    to set where it lands in the digest; the order starts chronological.
    **Clicking** a row scrolls the preview to it. The content accrues on the
-   right as each post is read, so you can see what was actually captured
-   before generating anything.
+   right as each post is read — images and all, fetched as you scroll to them —
+   so you can see what was actually captured before generating anything.
 
    Two ways to take material out, both provisional. The **trash** on a row
    removes that whole article. **Remove content** turns the pointer into a
@@ -236,11 +240,12 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
 | Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for link-roundup newsletters; returns one entry per linked article. **Exactly one model call**, and its only job is naming the links — **structured outputs** (`output_config.format` with a JSON schema) give back title, author, URL and the newsletter's note, all quoted from the email rather than composed. Everything after that is code: the app resolves each link, scrapes the article, and assembles the entry. Nothing in the digest is generated, so the model can't invent text and isn't spending a minute a newsletter retyping what the scraper already has. Every URL it returns is checked against the email character for character, and one that isn't there is logged as a warning. API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s for the model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |
-| Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists kept as lists, quotes as quotes — with nested matches emitted once. `script`, `style` and `nav` never match, so their text can't reach the digest |
+| Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists as lists, quotes as quotes, images as images — with nested matches emitted once. Image addresses are resolved against the page, and lazy-loaded `data-src`/`srcset` are read, so a placeholder `src` doesn't cost you the picture |
+| Body-copy detection | `src-tauri/src/anthropic.rs` | Rather than taking every readable tag on the page, it works out where the piece actually lives: each paragraph's length is credited to all its ancestors, and the **deepest** container still holding ~90% of the best score wins — which narrows `body > div > article` down to the article. Furniture (`nav`/`header`/`footer`/`aside`/`form`, `aria-hidden`, and classes made of words like `comments`, `share`, `subscription`, `sidebar`, `related`) is dropped first, so it can't win on a long comment thread. Class names are matched **word by word**, never as substrings — Substack's own article is `class="newsletter-post"`, which a substring match for "newsletter" would discard wholesale. The container it settled on is named in the log |
 | PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib |
 | EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
-| Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |
+| Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters and by the Organize preview, which shows the same re-encoded image it will print. The preview fetches lazily (`IntersectionObserver`, a screen ahead), so a hundred-image digest doesn't stall the step for pictures nobody has scrolled to |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
 | Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark); a row's trash marks every block of that entry at once, so both land in the same place. Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
 | Reordering | `src/components/OrganizePanel.tsx` | Pointer events rather than HTML5 drag-and-drop, which touch devices don't fire — so the same code reorders under a mouse on the Mac and a finger on the iPad. A press only becomes a drag past a 4px threshold, leaving a plain click free to mean "show me this entry" |

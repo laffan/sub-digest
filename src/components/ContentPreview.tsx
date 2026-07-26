@@ -1,5 +1,6 @@
 import { createElement, useCallback, useEffect, useRef, useState } from "react";
 import { blockKey, byline, type Block, type DigestPost } from "../types";
+import { imageObjectUrl } from "../images";
 import { formatLongDate } from "../dates";
 
 interface Props {
@@ -215,10 +216,56 @@ function BlockView({ block }: { block: Block }) {
         </ul>
       );
     case "image":
-      // Images are fetched and re-encoded at generation time; this is a marker
-      // so the shape of the post reads correctly.
-      return <p className="cp-image">▣ image</p>;
+      return <ImageBlock src={block.src} />;
     case "rule":
       return <hr />;
   }
+}
+
+/**
+ * An image, fetched only once it's nearly on screen. A digest can carry a
+ * hundred of them and they all go through the backend to dodge CORS, so
+ * fetching the lot the moment Organize opens would stall the step and hammer
+ * the CDNs for pictures nobody has scrolled to yet.
+ */
+function ImageBlock({ src }: { src: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let live = true;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        observer.disconnect();
+        imageObjectUrl(src)
+          .then((got) => {
+            if (!live) return;
+            if (got) setUrl(got);
+            else setFailed(true);
+          })
+          .catch(() => live && setFailed(true));
+      },
+      // Start a screen ahead, so scrolling meets pictures already there.
+      { rootMargin: "600px" }
+    );
+    observer.observe(el);
+    return () => {
+      live = false;
+      observer.disconnect();
+    };
+  }, [src]);
+
+  return (
+    <div className="cp-figure" ref={ref}>
+      {url ? (
+        <img src={url} alt="" />
+      ) : (
+        <span className="cp-image">▣ {failed ? "image unavailable" : "image"}</span>
+      )}
+    </div>
+  );
 }

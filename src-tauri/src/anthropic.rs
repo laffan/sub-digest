@@ -741,7 +741,7 @@ async fn resolve_and_fetch(
     let started = Instant::now();
     log::info(app, "fetch", format!("GET {}", log::ellipsize(requested, 140)));
 
-    let (landed, text) = fetch_url(requested, selector).await.map_err(|e| {
+    let (landed, page) = fetch_url(requested, selector).await.map_err(|e| {
         log::warn(
             app,
             "fetch",
@@ -758,35 +758,42 @@ async fn resolve_and_fetch(
     if let Some(bare) = without_query(&landed) {
         log::info(app, "fetch", format!("  retrying without query: {}", log::ellipsize(bare.as_str(), 140)));
         match fetch_url(bare.as_str(), selector).await {
-            Ok((_, clean_text)) if !clean_text.trim().is_empty() => {
-                log::info(
-                    app,
-                    "fetch",
-                    format!(
-                        "  used {} — {} chars in {:.1}s",
-                        log::ellipsize(bare.as_str(), 100),
-                        clean_text.chars().count(),
-                        started.elapsed().as_secs_f32()
-                    ),
-                );
-                return Ok(Article { url: bare.to_string(), markdown: clean_text });
+            Ok((_, clean)) if !clean.markdown.trim().is_empty() => {
+                report_page(app, bare.as_str(), &clean, started);
+                return Ok(Article { url: bare.to_string(), markdown: clean.markdown });
             }
             Ok(_) => log::warn(app, "fetch", "  bare URL returned nothing; keeping the original"),
             Err(e) => log::warn(app, "fetch", format!("  bare URL failed ({e}); keeping the original")),
         }
     }
 
+    report_page(app, landed.as_str(), &page, started);
+    Ok(Article { url: landed.to_string(), markdown: page.markdown })
+}
+
+/// Says what was read and, just as usefully, what it was read *out of*: naming
+/// the container the body copy came from is what makes a bad scrape diagnosable
+/// — and a selector worth pinning in the newsletter's instructions.
+fn report_page(app: &AppHandle, url: &str, page: &Extracted, started: Instant) {
+    let images = page.markdown.matches("\n![](").count() + usize::from(page.markdown.starts_with("!["));
     log::info(
         app,
         "fetch",
         format!(
             "  used {} — {} chars in {:.1}s",
-            log::ellipsize(landed.as_str(), 100),
-            text.chars().count(),
+            log::ellipsize(url, 100),
+            page.markdown.chars().count(),
             started.elapsed().as_secs_f32()
         ),
     );
-    Ok(Article { url: landed.to_string(), markdown: text })
+    log::info(
+        app,
+        "fetch",
+        format!(
+            "  body copy from {} — {} blocks, {images} image(s); page furniture dropped",
+            page.container, page.paragraphs
+        ),
+    );
 }
 
 /// The same URL without its query string or fragment, or None when there was
@@ -816,8 +823,8 @@ fn host_blocked(host: &str) -> bool {
 }
 
 /// Fetches one URL and returns the URL it actually landed on together with the
-/// page's readable text.
-async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, String), String> {
+/// page's readable content.
+async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, Extracted), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("only http(s) URLs can be fetched".to_string());
@@ -851,64 +858,272 @@ async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, Strin
     };
 
     // Parse + extract synchronously (scraper's Html isn't Send; no awaits here).
-    let out = extract(&body, selector)?;
-    Ok((landed, truncate_output(out)))
+    let mut out = extract(&body, selector, &landed)?;
+    out.markdown = truncate_output(out.markdown);
+    Ok((landed, out))
 }
 
 /// Tags that carry a page's readable content. `script`, `style` and `nav` are
 /// not among them, so their text never reaches the digest.
-const CONTENT_TAGS: &str = "p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption";
+const CONTENT_TAGS: &str = "p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, img";
+
+/// Tags that are page furniture wherever they appear.
+const CHROME_TAGS: [&str; 8] = [
+    "nav", "header", "footer", "aside", "form", "button", "noscript", "template",
+];
+
+/// Words that name furniture when a `class` or `id` is *made of* them. Whatever
+/// they're attached to, and everything inside it, is left out of the digest —
+/// this is the bulk of what a reader would otherwise have to strike out by hand.
+///
+/// Matched as whole words, not substrings: Substack's own article is
+/// `class="newsletter-post"` and an opinion column is plausibly `.commentary`,
+/// both of which a substring match would throw away wholesale.
+const CHROME_WORDS: [&str; 39] = [
+    "comment", "comments", "share", "sharing", "social", "subscribe", "subscription", "signup",
+    "promo", "promotion", "sidebar", "related", "recommended", "recommendations", "footer",
+    "header", "nav", "navigation", "menu", "banner", "cookie", "consent", "paywall", "popup",
+    "modal", "ad", "ads", "advert", "advertisement", "sponsor", "sponsored", "breadcrumb",
+    "breadcrumbs", "pagination", "toolbar", "masthead", "hidden", "skip", "widget",
+];
+
+/// Names for furniture that only read as furniture whole, so they're matched
+/// against the raw string rather than word by word.
+const CHROME_PHRASES: [&str; 4] = ["sr-only", "screen-reader", "visually-hidden", "sign-up"];
+
+/// Words that name the piece itself. Only used to break ties between candidate
+/// containers — density decides first.
+const BODY_WORDS: [&str; 9] = [
+    "article", "post", "content", "entry", "story", "prose", "markup", "body", "main",
+];
+
+/// Whether any whole word of a class/id list appears in `words`. Splitting on
+/// the separators CSS names actually use is what makes `newsletter-post` read as
+/// "newsletter" and "post" rather than matching anything that contains either.
+fn has_word(names: &str, words: &[&str]) -> bool {
+    names
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| !token.is_empty() && words.contains(&token))
+}
+
+/// A paragraph shorter than this is furniture more often than not (a caption on
+/// a promo, a link label), so it doesn't count towards a container's score.
+const MIN_SCORING_CHARS: usize = 25;
+
+/// What `extract` settled on, so the log can say where the text came from.
+struct Extracted {
+    markdown: String,
+    /// The container the body copy was read out of, e.g. `div.post-content`.
+    container: String,
+    paragraphs: usize,
+}
+
+/// The tag and class/id of an element, in CSS-selector shape, for the log.
+fn describe_element(el: scraper::ElementRef) -> String {
+    let v = el.value();
+    let mut out = v.name().to_string();
+    if let Some(id) = v.id() {
+        out.push('#');
+        out.push_str(id);
+    }
+    for class in v.classes().take(2) {
+        out.push('.');
+        out.push_str(class);
+    }
+    out
+}
+
+/// An element's `id` and classes, lowercased, for matching against the word
+/// lists above.
+fn element_names(el: scraper::ElementRef) -> String {
+    let v = el.value();
+    let mut out = String::new();
+    if let Some(id) = v.id() {
+        out.push_str(id);
+        out.push(' ');
+    }
+    for class in v.classes() {
+        out.push_str(class);
+        out.push(' ');
+    }
+    out.to_ascii_lowercase()
+}
+
+/// Whether this element is furniture in its own right — by tag, by what it's
+/// called, or by the accessibility role it claims.
+fn is_chrome(el: scraper::ElementRef) -> bool {
+    let v = el.value();
+    if CHROME_TAGS.contains(&v.name()) {
+        return true;
+    }
+    if v.attr("hidden").is_some() || v.attr("aria-hidden") == Some("true") {
+        return true;
+    }
+    if matches!(
+        v.attr("role"),
+        Some("navigation" | "banner" | "complementary" | "contentinfo" | "search" | "dialog")
+    ) {
+        return true;
+    }
+    let names = element_names(el);
+    if names.is_empty() {
+        return false;
+    }
+    CHROME_PHRASES.iter().any(|p| names.contains(p)) || has_word(&names, &CHROME_WORDS)
+}
 
 /// Reads a page as Markdown. This used to return one flat run of text, because
 /// its only reader was a model that would restate it; now the result goes into
 /// the digest as it stands, so the page's own structure — headings, lists,
-/// quotes — has to survive the trip.
-fn extract(html: &str, selector: Option<&str>) -> Result<String, String> {
+/// quotes, images — has to survive the trip.
+///
+/// Without a selector it works out where the body copy lives rather than taking
+/// every readable tag on the page: the container holding the most paragraph text
+/// wins, and the deepest container still holding nearly all of it is the one
+/// read, which narrows `body > div > article` down to the article. Furniture is
+/// dropped on the way. The point is that an entry arrives close to what the
+/// reader wanted, instead of needing the comment section struck out by hand.
+fn extract(html: &str, selector: Option<&str>, base: &url::Url) -> Result<Extracted, String> {
     let doc = scraper::Html::parse_document(html);
     let content = scraper::Selector::parse(CONTENT_TAGS).expect("static selector");
 
-    let picked: Vec<scraper::ElementRef> = match selector {
+    // Furniture, and anything inside it.
+    let chrome: std::collections::HashSet<_> = doc
+        .select(&scraper::Selector::parse("*").expect("static selector"))
+        .filter(|el| is_chrome(*el))
+        .map(|el| el.id())
+        .collect();
+    let in_chrome = |el: scraper::ElementRef| {
+        chrome.contains(&el.id()) || el.ancestors().any(|a| chrome.contains(&a.id()))
+    };
+
+    let (roots, container) = match selector {
         Some(sel) => {
             let parsed = scraper::Selector::parse(sel)
                 .map_err(|e| format!("invalid CSS selector '{sel}': {e:?}"))?;
-            let roots: Vec<_> = doc.select(&parsed).collect();
-            if roots.is_empty() {
+            let found: Vec<_> = doc.select(&parsed).collect();
+            if found.is_empty() {
                 return Err(format!("no elements matched selector '{sel}'"));
             }
-            let inner: Vec<_> = roots.iter().flat_map(|r| r.select(&content)).collect();
-            // A selector can name the text-bearing element itself, in which
-            // case there is nothing further inside it to pick out.
-            if inner.is_empty() { roots } else { inner }
+            (found, sel.to_string())
         }
-        None => doc.select(&content).collect(),
+        None => match body_container(&doc, &in_chrome) {
+            Some(el) => (vec![el], describe_element(el)),
+            // Nothing scored: fall through to the whole document rather than
+            // failing outright, and let the caller see it in the log.
+            None => (doc.select(&scraper::Selector::parse("body").unwrap()).collect(), "body".to_string()),
+        },
+    };
+
+    let picked: Vec<scraper::ElementRef> = {
+        let inner: Vec<_> = roots
+            .iter()
+            .flat_map(|r| r.select(&content))
+            .filter(|el| !in_chrome(*el))
+            .collect();
+        // A selector can name the text-bearing element itself, in which case
+        // there is nothing further inside it to pick out.
+        if inner.is_empty() { roots } else { inner }
     };
 
     // These tags nest — a `blockquote` holds `p`s, an `li` can hold anything —
     // and every level matches, so an element already covered by an ancestor
-    // would otherwise have its text emitted twice.
+    // would otherwise have its text emitted twice. Images are exempt: an image
+    // inside a paragraph isn't said by that paragraph's text.
     let chosen: std::collections::HashSet<_> = picked.iter().map(|el| el.id()).collect();
-    let blocks: Vec<String> = picked
-        .iter()
-        .filter(|el| !el.ancestors().any(|a| chosen.contains(&a.id())))
-        .filter_map(|el| as_markdown(*el))
-        .collect();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut paragraphs = 0;
+    for el in picked.iter() {
+        let is_image = el.value().name() == "img";
+        if !is_image && el.ancestors().any(|a| chosen.contains(&a.id())) {
+            continue;
+        }
+        let Some(md) = as_markdown(*el, base) else { continue };
+        // The same image twice running is a lazy-loading placeholder and its
+        // real self, or a figure repeated at two breakpoints.
+        if is_image && blocks.last() == Some(&md) {
+            continue;
+        }
+        if !is_image {
+            paragraphs += 1;
+        }
+        blocks.push(md);
+    }
 
     if !blocks.is_empty() {
-        return Ok(join_blocks(&blocks));
+        return Ok(Extracted { markdown: join_blocks(&blocks), container, paragraphs });
     }
     // Fallback: whole-body text.
     let body = scraper::Selector::parse("body").expect("static selector");
     if let Some(b) = doc.select(&body).next() {
         let text = normalize(&b.text().collect::<Vec<_>>().join(" "));
         if !text.is_empty() {
-            return Ok(text);
+            return Ok(Extracted { markdown: text, container: "body (plain text)".into(), paragraphs: 0 });
         }
     }
     Err("no readable text found on the page".to_string())
 }
 
-/// One content element as a Markdown block, or None when it holds no text.
-fn as_markdown(el: scraper::ElementRef) -> Option<String> {
+/// Finds the element the body copy lives in, by how much paragraph text hangs
+/// below it. Every ancestor of a paragraph is credited with its length, so the
+/// score rises towards the root; the deepest element still holding nearly all
+/// of the best score is the tightest wrapper around the piece.
+fn body_container<'a>(
+    doc: &'a scraper::Html,
+    in_chrome: &dyn Fn(scraper::ElementRef) -> bool,
+) -> Option<scraper::ElementRef<'a>> {
+    let text_tags = scraper::Selector::parse("p, li, blockquote").expect("static selector");
+    // Keyed by node id; the type is ego-tree's, which isn't a direct dependency,
+    // so it's left to inference rather than pulling the crate in to name it.
+    let mut scores = std::collections::HashMap::new();
+
+    for el in doc.select(&text_tags) {
+        if in_chrome(el) {
+            continue;
+        }
+        let len = normalize(&el.text().collect::<Vec<_>>().join(" ")).len();
+        if len < MIN_SCORING_CHARS {
+            continue;
+        }
+        for ancestor in el.ancestors() {
+            if ancestor.value().is_element() {
+                *scores.entry(ancestor.id()).or_default() += len;
+            }
+        }
+    }
+
+    // A container named for the article counts for a little more than one that
+    // merely wraps it, which is what separates `div.post-content` from the
+    // `div` around it holding the same text.
+    let adjusted = |el: scraper::ElementRef, raw: usize| -> usize {
+        if has_word(&element_names(el), &BODY_WORDS) { raw * 5 / 4 } else { raw }
+    };
+
+    let candidates: Vec<(scraper::ElementRef, usize)> = doc
+        .select(&scraper::Selector::parse("*").expect("static selector"))
+        .filter(|el| !in_chrome(*el))
+        .filter_map(|el| scores.get(&el.id()).map(|raw| (el, adjusted(el, *raw))))
+        .collect();
+
+    // The best score belongs to the whole page as much as to the piece, since
+    // an ancestor is credited with everything below it. So take the deepest
+    // element still holding nearly all of that text: the tightest wrapper
+    // around the body copy, rather than the page that contains it.
+    let top = candidates.iter().map(|(_, score)| *score).max()?;
+    let threshold = top * 9 / 10;
+    candidates
+        .into_iter()
+        .filter(|(_, score)| *score >= threshold)
+        .max_by_key(|(el, _)| el.ancestors().count())
+        .map(|(el, _)| el)
+}
+
+/// One content element as a Markdown block, or None when it holds nothing worth
+/// keeping.
+fn as_markdown(el: scraper::ElementRef, base: &url::Url) -> Option<String> {
+    if el.value().name() == "img" {
+        return image_markdown(el, base);
+    }
     let text = normalize(&el.text().collect::<Vec<_>>().join(" "));
     if text.is_empty() {
         return None;
@@ -925,6 +1140,48 @@ fn as_markdown(el: scraper::ElementRef) -> Option<String> {
         "blockquote" => format!("> {text}"),
         _ => text,
     })
+}
+
+/// Patterns in an image's URL that mean it isn't part of the piece.
+const IMAGE_NOISE: [&str; 9] = [
+    "pixel", "spacer", "tracking", "/icons/", "/icon/", "avatar", "logo", "emoji", "1x1",
+];
+
+/// An image as Markdown, with its address resolved against the page it was on.
+/// Lazy-loaded images keep the real URL in `data-src` or `srcset` and leave
+/// `src` holding a placeholder, so all three are worth looking at.
+fn image_markdown(el: scraper::ElementRef, base: &url::Url) -> Option<String> {
+    let v = el.value();
+    let raw = v
+        .attr("src")
+        .filter(|s| !s.trim().is_empty() && !s.starts_with("data:"))
+        .or_else(|| v.attr("data-src"))
+        .or_else(|| v.attr("data-original"))
+        .or_else(|| v.attr("srcset").and_then(|s| s.split(',').next()))
+        .map(|s| s.split_whitespace().next().unwrap_or("").trim())?;
+    if raw.is_empty() {
+        return None;
+    }
+
+    // Spacers and tracking pixels announce themselves in their dimensions.
+    let small = |name: &str| {
+        v.attr(name)
+            .and_then(|n| n.trim().parse::<u32>().ok())
+            .is_some_and(|n| n <= 3)
+    };
+    if small("width") || small("height") {
+        return None;
+    }
+
+    let resolved = base.join(raw).ok()?;
+    if !matches!(resolved.scheme(), "http" | "https") {
+        return None;
+    }
+    let lower = resolved.as_str().to_ascii_lowercase();
+    if IMAGE_NOISE.iter().any(|p| lower.contains(p)) {
+        return None;
+    }
+    Some(format!("![]({resolved})"))
 }
 
 /// Joins blocks with the blank line Markdown needs between them — except
@@ -971,9 +1228,17 @@ mod tests {
           <footer>© 2026</footer>
         </body></html>"#;
 
+    fn base() -> url::Url {
+        url::Url::parse("https://example.com/2026/a-piece/").unwrap()
+    }
+
+    fn scrape(html: &str, selector: Option<&str>) -> String {
+        extract(html, selector, &base()).unwrap().markdown
+    }
+
     #[test]
     fn extracts_selector_text() {
-        let out = extract(PAGE, Some(".post-content")).unwrap();
+        let out = scrape(PAGE, Some(".post-content"));
         assert!(out.contains("First paragraph of the article."));
         assert!(out.contains("Second paragraph here."));
         assert!(!out.contains("sidebar"));
@@ -982,7 +1247,7 @@ mod tests {
 
     #[test]
     fn readable_text_skips_chrome_and_scripts() {
-        let out = extract(PAGE, None).unwrap();
+        let out = scrape(PAGE, None);
         assert!(out.contains("The Headline"));
         assert!(out.contains("First paragraph of the article."));
         assert!(!out.contains("noise")); // no <script> body
@@ -991,7 +1256,152 @@ mod tests {
 
     #[test]
     fn missing_selector_errors() {
-        assert!(extract(PAGE, Some(".does-not-exist")).is_err());
+        assert!(extract(PAGE, Some(".does-not-exist"), &base()).is_err());
+    }
+
+    /// A real article page is mostly not the article. The body copy has to be
+    /// found among the furniture, so an entry arrives close to what the reader
+    /// wanted rather than needing the comment section struck out by hand.
+    #[test]
+    fn finds_the_body_copy_among_the_furniture() {
+        let page = r#"<html><body>
+            <nav><a href="/">Home</a><a href="/about">About the magazine we publish</a></nav>
+            <div class="site-banner"><p>Subscribe today for unlimited access to everything.</p></div>
+            <div id="page">
+              <div class="wrapper">
+                <article class="post-content">
+                  <h1>The Headline</h1>
+                  <p>The opening paragraph of the piece, which runs on for a while.</p>
+                  <p>A second paragraph, also of a respectable and readable length.</p>
+                  <p>And a third, so the body copy plainly outweighs the rest of it.</p>
+                </article>
+              </div>
+              <aside class="related"><p>You might also like this other article entirely.</p></aside>
+              <div class="comments"><p>Reader comment that has nothing to do with the piece.</p></div>
+            </div>
+            <footer><p>Copyright the publisher, all rights reserved worldwide.</p></footer>
+        </body></html>"#;
+
+        let out = extract(page, None, &base()).unwrap();
+        assert_eq!(out.container, "article.post-content", "should name what it read");
+        assert!(out.markdown.contains("The opening paragraph"));
+        assert!(out.markdown.contains("And a third"));
+        for furniture in ["Home", "Subscribe today", "You might also like", "Reader comment", "Copyright"] {
+            assert!(!out.markdown.contains(furniture), "{furniture:?} should have been dropped:\n{}", out.markdown);
+        }
+    }
+
+    /// The shape this app meets most often: a Substack post page. Its article
+    /// is `class="newsletter-post"` and its body is `class="body markup"`, which
+    /// is why furniture is matched word by word — "newsletter" as a substring
+    /// would take the whole piece with it.
+    #[test]
+    fn reads_a_substack_post_page() {
+        let page = r#"<html><body><div id="main">
+          <div class="topbar"><nav><a href="/">Astral Codex Ten</a></nav></div>
+          <article class="newsletter-post post typography">
+            <div class="post-header">
+              <h1 class="post-title">Your Book Review</h1>
+              <div class="byline-wrapper"><a href="/profile">Scott Alexander</a></div>
+              <div class="post-ufi"><a>Share</a><a>Comment</a></div>
+            </div>
+            <div class="available-content">
+              <div class="body markup">
+                <p>The first paragraph of the essay, which is long enough to count.</p>
+                <div class="captioned-image-container">
+                  <figure><img src="/img/plate.jpg" width="900"/>
+                  <figcaption>A plate from the book.</figcaption></figure>
+                </div>
+                <p>The second paragraph, carrying on at a similar readable length.</p>
+                <blockquote><p>A line quoted from the book under discussion here.</p></blockquote>
+                <p>The third paragraph, which brings the argument to its close.</p>
+              </div>
+            </div>
+            <div class="subscription-widget-wrap">
+              <p>Subscribe now to get every post delivered to your inbox.</p>
+            </div>
+            <div class="post-footer"><p>Copyright notice and legal small print here.</p></div>
+          </article>
+          <div class="comments-page"><p>A reader's comment, at length, below the piece.</p></div>
+        </div></body></html>"#;
+
+        let out = extract(page, None, &base()).unwrap();
+        assert_eq!(out.container, "div.body.markup", "should read the post body");
+        assert!(out.markdown.contains("The first paragraph of the essay"));
+        assert!(out.markdown.contains("> A line quoted from the book"));
+        assert!(out.markdown.contains("![](https://example.com/img/plate.jpg)"), "{}", out.markdown);
+        assert!(out.markdown.contains("A plate from the book."));
+        for furniture in ["Astral Codex Ten", "Share", "Subscribe now", "Copyright", "reader's comment"] {
+            assert!(
+                !out.markdown.contains(furniture),
+                "{furniture:?} should have been dropped:\n{}",
+                out.markdown
+            );
+        }
+    }
+
+    /// Whole-word matching is the whole point: these are real class names that a
+    /// substring match would get wrong in both directions.
+    #[test]
+    fn tells_furniture_from_body_copy_by_whole_words() {
+        assert!(has_word("post-header byline", &CHROME_WORDS));
+        assert!(has_word("comments-page", &CHROME_WORDS));
+        assert!(has_word("subscription-widget-wrap", &CHROME_WORDS));
+        // The piece itself, in class names that merely contain a furniture word.
+        assert!(!has_word("newsletter-post typography", &CHROME_WORDS));
+        assert!(!has_word("commentary", &CHROME_WORDS));
+        assert!(!has_word("adaptation-notes", &CHROME_WORDS));
+        assert!(!has_word("readable", &CHROME_WORDS));
+    }
+
+    /// The wrapper `div`s hold exactly the same text as the article inside them,
+    /// so depth is what separates them — otherwise the whole page wins.
+    #[test]
+    fn prefers_the_tightest_wrapper_around_the_text() {
+        let page = r#"<html><body><div id="outer"><div id="middle"><section id="piece">
+            <p>Only one paragraph lives here, but it is a long enough one to count.</p>
+            <p>And here is its companion, equally long, in the same section.</p>
+        </section></div></div></body></html>"#;
+        assert_eq!(extract(page, None, &base()).unwrap().container, "section#piece");
+    }
+
+    /// Images are part of the piece, and the digest can only fetch them if the
+    /// scrape hands back an absolute address.
+    #[test]
+    fn keeps_images_and_resolves_their_addresses() {
+        let page = r#"<html><body><article class="post">
+            <p>A paragraph long enough to anchor the body copy detection here.</p>
+            <figure>
+              <img src="/media/photo.jpg" width="800" height="600"/>
+              <figcaption>What the photograph shows.</figcaption>
+            </figure>
+            <p>Another paragraph, also of a length that counts for scoring.</p>
+            <img src="data:image/gif;base64,R0lGOD" data-src="https://cdn.example.com/late.jpg"/>
+            <img src="/img/tracking-pixel.gif" width="1" height="1"/>
+            <img src="/icons/share.svg"/>
+        </article></body></html>"#;
+
+        let out = scrape(page, None);
+        assert!(out.contains("![](https://example.com/media/photo.jpg)"), "{out}");
+        assert!(out.contains("What the photograph shows."));
+        // Lazy-loaded: the real address hides in data-src behind a placeholder.
+        assert!(out.contains("![](https://cdn.example.com/late.jpg)"), "{out}");
+        // Furniture images are not part of the piece.
+        assert!(!out.contains("tracking-pixel"), "{out}");
+        assert!(!out.contains("share.svg"), "{out}");
+    }
+
+    /// An image inside a paragraph is not said by that paragraph's text, so the
+    /// nesting rule that stops text being emitted twice must not eat it.
+    #[test]
+    fn an_image_inside_a_paragraph_survives() {
+        let page = r#"<html><body><article>
+            <p>Words about the picture, at a length that counts for the scoring.</p>
+            <p>More words, and then the picture itself: <img src="https://example.com/a.png"/></p>
+        </article></body></html>"#;
+        let out = scrape(page, None);
+        assert!(out.contains("![](https://example.com/a.png)"), "{out}");
+        assert!(out.contains("More words"));
     }
 
     /// The scraped page goes into the digest as it stands, so its shape has to
@@ -1008,7 +1418,7 @@ mod tests {
             <p>Closing paragraph.</p>
         </article></body></html>"#;
 
-        let out = extract(page, None).unwrap();
+        let out = scrape(page, None);
         assert_eq!(
             out,
             "### The Headline\n\n\
@@ -1026,7 +1436,7 @@ mod tests {
     #[test]
     fn selector_on_a_leaf_element_still_reads() {
         let page = r#"<html><body><p class="lede">Just the one line.</p></body></html>"#;
-        assert_eq!(extract(page, Some(".lede")).unwrap(), "Just the one line.");
+        assert_eq!(scrape(page, Some(".lede")), "Just the one line.");
     }
 
     /// One entry per article, carrying the newsletter's title, byline and note,

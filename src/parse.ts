@@ -231,6 +231,12 @@ function walk(node: Element, out: Block[]) {
     const tag = child.tagName;
     if (BLOCK_TAGS.has(tag)) {
       emit(child, out);
+    } else if (tag === "A" || tag === "PICTURE") {
+      // Substack links its images back to the post, and serves them inside a
+      // `<picture>`. Neither is a block, so without this the image is simply
+      // never reached — but the link's own text must not become a paragraph
+      // either, which is how "Read more" ends up in the digest.
+      if (child.querySelector("img, figure")) walk(child, out);
     } else if (
       tag === "DIV" ||
       tag === "TABLE" ||
@@ -244,7 +250,9 @@ function walk(node: Element, out: Block[]) {
     ) {
       // Structural wrapper: recurse, but if it contains no block children and
       // has direct text, treat it as a paragraph.
-      if (child.querySelector("p, h1, h2, h3, h4, h5, h6, blockquote, ul, ol, img, figure, hr")) {
+      if (
+        child.querySelector("p, h1, h2, h3, h4, h5, h6, blockquote, ul, ol, img, figure, picture, hr")
+      ) {
         walk(child, out);
       } else {
         const text = textOf(child);

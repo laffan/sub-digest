@@ -4,6 +4,26 @@ import type { PreparedImage } from "./types";
 const MAX_PX = 1400;
 
 const cache = new Map<string, PreparedImage | null>();
+const objectUrls = new Map<string, string | null>();
+
+/**
+ * A URL the webview can show, for the Organize preview. It goes through the
+ * same fetch-and-re-encode the exporters use, so seeing an image here warms the
+ * cache that generating the document will read — and an image that can't be
+ * displayed is exactly the one that won't make it into the output either.
+ */
+export async function imageObjectUrl(src: string): Promise<string | null> {
+  const known = objectUrls.get(src);
+  if (known !== undefined) return known;
+  const prepared = await prepareImage(src);
+  // Copied into a fresh array: `Blob` won't take a view whose buffer might be
+  // shared, and the copy costs a few hundred kilobytes once per image.
+  const url = prepared
+    ? URL.createObjectURL(new Blob([new Uint8Array(prepared.jpeg)], { type: "image/jpeg" }))
+    : null;
+  objectUrls.set(src, url);
+  return url;
+}
 
 /**
  * Fetches an image through the Rust backend (avoids CORS), decodes it in the
