@@ -47,9 +47,17 @@ little magazine of your recent reading — or an EPUB for your e-reader.
      and line height carry over as the book's stylesheet. Text stays UTF-8, so
      emoji and CJK survive here even though the PDF drops them.
 
-The window has three columns: account + discovered posts on the left, output
-format and its settings in the middle, and a live preview on the right — the
-real generated PDF, or the EPUB's own markup and stylesheet for e-books.
+The window has one working column beside the preview, and it moves through the
+two steps in order: pick your posts, hit **Continue**, and the column becomes
+the output settings (with a link back). A selection can't change under a run
+that's already going. The preview on the right shows the real generated PDF, or
+the EPUB's own markup and stylesheet for e-books.
+
+The **log** button next to the gear opens a pane across the foot of the window:
+Gmail queries and match counts, every generation step, and the agent's own
+running commentary — each model turn with its timing and token counts, every
+page it fetches, retries, and anything that fails. It's the place to look when
+a newsletter comes out wrong. **Copy** puts the whole log on the clipboard.
 
 ## Setup
 
@@ -198,12 +206,13 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
-| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for hard-to-parse newsletters; returns Markdown. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs). API key set in Settings; runs in Rust (no CORS) |
+| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for hard-to-parse newsletters; returns Markdown. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs). API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s per model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
 | PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib |
 | EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
+| Log | `src/log.ts`, `src-tauri/src/log.rs` | Module-level store in the UI (any layer can write without prop drilling); the backend feeds it over a Tauri `log` event |
 
 Generated PDFs use the PDF standard fonts (Times, Helvetica, Courier), so
 files stay small; text outside WinAnsi (emoji, CJK) is dropped from output.

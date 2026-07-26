@@ -112,6 +112,12 @@ fn http() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent("SubDigest/0.1")
+            // Without these a stalled fetch waits forever, which reads as the
+            // app hanging mid-run. Idle connections are retired early so a
+            // request never goes out on one the far end has already dropped.
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(90))
+            .pool_idle_timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build http client")
     })
@@ -391,6 +397,8 @@ pub async fn gmail_search(
         query.push_str(&format!(" before:{}", before_ms / 1000));
     }
 
+    crate::log::info(&app, "gmail", format!("Query: {query}"));
+
     // Page through matching message ids
     let mut ids: Vec<String> = Vec::new();
     let mut page_token = String::new();
@@ -455,6 +463,7 @@ pub async fn gmail_search(
 
     let mut out: Vec<PostMeta> = metas.into_iter().collect::<Result<_, _>>()?;
     out.sort_by_key(|m| -m.date_ms);
+    crate::log::info(&app, "gmail", format!("{} messages matched", out.len()));
     Ok(out)
 }
 

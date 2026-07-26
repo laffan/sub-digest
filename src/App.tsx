@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { AuthPanel } from "./components/AuthPanel";
 import { PostList } from "./components/PostList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
+import { LogPane } from "./components/LogPane";
+import { log, logError, logInfo, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
 import { markdownToBlocks } from "./parse";
 import {
@@ -73,6 +76,7 @@ function loadDomains(): string[] {
   return DEFAULT_DOMAINS;
 }
 
+
 export default function App() {
   const [account, setAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -96,6 +100,10 @@ export default function App() {
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<GeneratedOutput | null>(null);
+  // Picking posts and setting up the output are separate steps in one column,
+  // so a selection can't be changed out from under a run in progress.
+  const [step, setStep] = useState<"select" | "output">("select");
+  const [showLog, setShowLog] = useState(false);
 
   // Fetched email bodies, cached by message id so re-generating is instant.
   const bodyCache = useRef(new Map<string, string>());
@@ -104,6 +112,29 @@ export default function App() {
     gmailStatus()
       .then(setAccount)
       .catch(() => setAccount(null));
+  }, []);
+
+  // The backend logs over Tauri events; outside a Tauri window there are none.
+  useEffect(() => {
+    const unlisten = listen<{ level: LogLevel; source: string; message: string }>(
+      "log",
+      (event) => log(event.payload.level, event.payload.source, event.payload.message)
+    ).catch(() => undefined);
+    return () => {
+      unlisten.then((off) => off?.()).catch(() => {});
+    };
+  }, []);
+
+  /** Shows a step's status inline and keeps a copy in the log. */
+  const report = useCallback((message: string) => {
+    setProgress(message);
+    if (message) logInfo("render", message);
+  }, []);
+
+  const fail = useCallback((source: string, e: unknown) => {
+    const message = String(e);
+    setError(message);
+    logError(source, message);
   }, []);
 
   useEffect(() => {
@@ -164,6 +195,8 @@ export default function App() {
     setAccount(null);
     setPosts([]);
     setOutput(null);
+    setStep("select");
+    logInfo("gmail", "Signed out");
   }, []);
 
   // The scan window, as epoch millis; 0 on either side means "open ended".
@@ -184,23 +217,29 @@ export default function App() {
     if (!scanWindow) return;
     setError(null);
     setScanning(true);
+    const label = (ms: number) => (ms > 0 ? new Date(ms).toLocaleString() : "any");
+    logInfo(
+      "gmail",
+      `Scanning ${domains.join(", ")} from ${label(scanWindow.after)} to ${label(scanWindow.before)}`
+    );
     try {
       const metas = await gmailSearch(scanWindow.after, scanWindow.before, domains);
-      setPosts(
-        metas
-          .map((m) => ({
-            ...m,
-            publication: publicationFromHeader(m.from),
-            selected: true,
-          }))
-          .sort((a, b) => b.dateMs - a.dateMs)
-      );
+      const found = metas
+        .map((m) => ({
+          ...m,
+          publication: publicationFromHeader(m.from),
+          selected: true,
+        }))
+        .sort((a, b) => b.dateMs - a.dateMs);
+      setPosts(found);
+      const pubs = new Set(found.map((p) => p.publication));
+      logInfo("gmail", `Found ${found.length} posts from ${pubs.size} publications`);
     } catch (e) {
-      setError(String(e));
+      fail("gmail", e);
     } finally {
       setScanning(false);
     }
-  }, [scanWindow, domains]);
+  }, [scanWindow, domains, fail]);
 
   const togglePost = useCallback((id: string) => {
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, selected: !p.selected } : p)));
@@ -223,32 +262,42 @@ export default function App() {
     if (selected.length === 0) return;
     setError(null);
     setGenerating(true);
+    const startedAt = Date.now();
+    logInfo(
+      "render",
+      `Generating ${settings.format.toUpperCase()} from ${selected.length} posts`
+    );
     try {
       const digest: DigestPost[] = [];
       for (let i = 0; i < selected.length; i++) {
         const p = selected[i];
-        setProgress(`Fetching ${i + 1}/${selected.length}: ${p.subject}`);
+        report(`Fetching ${i + 1}/${selected.length}: ${p.subject}`);
         let body = bodyCache.current.get(p.id);
         if (body === undefined) {
           body = await gmailGetBody(p.id);
           bodyCache.current.set(p.id, body);
+          logInfo("gmail", `Fetched "${p.subject}" (${body.length} chars)`);
         }
         const agent = agentConfigs[p.publication];
         let blocks;
         if (agent?.useAgent && anthropicKey.trim()) {
-          setProgress(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
+          report(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
           try {
             const md = await anthropicProcess(anthropicKey, agent.instructions, p.subject, body);
             blocks = markdownToBlocks(md, p.subject);
+            logInfo("agent", `"${p.subject}" → ${blocks.length} blocks from ${md.length} chars`);
           } catch (e) {
             // Fall back to the default parser rather than failing the whole run.
-            setError(`Agent failed for "${p.publication}" — used default parsing. ${String(e)}`);
+            const message = `Agent failed for "${p.publication}" — used default parsing. ${String(e)}`;
+            setError(message);
+            logError("agent", message);
             const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
             blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
           }
         } else {
           const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
           blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
+          logInfo("parse", `"${p.subject}" → ${blocks.length} blocks`);
         }
         digest.push({
           publication: p.publication,
@@ -258,17 +307,18 @@ export default function App() {
         });
       }
       if (settings.format === "epub") {
-        setOutput(await generateEpub(digest, settings, setProgress));
+        setOutput(await generateEpub(digest, settings, report));
       } else {
-        setOutput({ format: "pdf", bytes: await generatePdf(digest, settings, setProgress) });
+        setOutput({ format: "pdf", bytes: await generatePdf(digest, settings, report) });
       }
       setProgress("");
+      logInfo("render", `Done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
     } catch (e) {
-      setError(String(e));
+      fail("render", e);
     } finally {
       setGenerating(false);
     }
-  }, [posts, settings, agentConfigs, anthropicKey]);
+  }, [posts, settings, agentConfigs, anthropicKey, report, fail]);
 
   const exportOutput = useCallback(async () => {
     if (!output) return;
@@ -285,76 +335,123 @@ export default function App() {
     }
     try {
       await saveFile(path, btoa(bin));
+      logInfo("save", `Wrote ${output.bytes.length.toLocaleString()} bytes to ${path}`);
     } catch (e) {
-      setError(String(e));
+      fail("save", e);
     }
-  }, [output]);
+  }, [output, fail]);
 
   return (
-    <div className="app">
+    <div className={`app${showLog ? " with-log" : ""}`}>
       <aside className="col col-left">
         <div className="brand-row">
           <h1 className="brand">Sub Digest</h1>
-          <button
-            className="icon-btn"
-            onClick={() => setShowSettings(true)}
-            aria-label="Settings"
-            title="Domains, agent & settings"
-          >
-            <GearIcon />
-          </button>
-        </div>
-        <AuthPanel
-          account={account}
-          connecting={connecting}
-          onConnect={connect}
-          onCancel={cancelConnect}
-          onDisconnect={disconnect}
-        />
-        {account && (
-          <PostList
-            posts={posts}
-            days={days}
-            range={range}
-            rangeValid={scanWindow !== null}
-            scanning={scanning}
-            agentConfigs={agentConfigs}
-            onDaysChange={setDays}
-            onRangeChange={setRange}
-            onScan={scan}
-            onTogglePost={togglePost}
-            onSetPostsSelected={setPostsSelected}
-            onTogglePublication={togglePublication}
-            onToggleAgent={toggleAgent}
-            onOpenAgentOptions={setAgentOptionsFor}
-          />
-        )}
-      </aside>
-
-      <aside className="col col-mid">
-        <h2 className="col-title">Output</h2>
-        <SettingsPanel settings={settings} onChange={setSettings} />
-        <div className="generate-area">
-          <button
-            className="primary generate"
-            disabled={generating || selectedCount === 0}
-            onClick={generate}
-          >
-            {generating ? "Generating…" : `Generate (${selectedCount} posts)`}
-          </button>
-          {output && !generating && (
-            <button className="secondary" onClick={exportOutput}>
-              {`Save ${output.format.toUpperCase()}…`}
+          <div className="brand-actions">
+            <button
+              className={`icon-btn${showLog ? " active" : ""}`}
+              onClick={() => setShowLog((v) => !v)}
+              aria-label="Log"
+              aria-pressed={showLog}
+              title={showLog ? "Hide log" : "Show log"}
+            >
+              <LogIcon />
             </button>
-          )}
-          {progress && <div className="progress">{progress}</div>}
-          {error && <div className="error">{error}</div>}
+            <button
+              className="icon-btn"
+              onClick={() => setShowSettings(true)}
+              aria-label="Settings"
+              title="Domains, agent & settings"
+            >
+              <GearIcon />
+            </button>
+          </div>
         </div>
+
+        {step === "select" ? (
+          <>
+            <div className="step-body">
+              <AuthPanel
+                account={account}
+                connecting={connecting}
+                onConnect={connect}
+                onCancel={cancelConnect}
+                onDisconnect={disconnect}
+              />
+              {account && (
+                <PostList
+                  posts={posts}
+                  days={days}
+                  range={range}
+                  rangeValid={scanWindow !== null}
+                  scanning={scanning}
+                  agentConfigs={agentConfigs}
+                  onDaysChange={setDays}
+                  onRangeChange={setRange}
+                  onScan={scan}
+                  onTogglePost={togglePost}
+                  onSetPostsSelected={setPostsSelected}
+                  onTogglePublication={togglePublication}
+                  onToggleAgent={toggleAgent}
+                  onOpenAgentOptions={setAgentOptionsFor}
+                />
+              )}
+            </div>
+            {(posts.length > 0 || error) && (
+              <div className="step-actions">
+                {posts.length > 0 && (
+                  <button
+                    className="primary"
+                    disabled={selectedCount === 0}
+                    onClick={() => setStep("output")}
+                  >
+                    {selectedCount === 0
+                      ? "Select some posts"
+                      : `Continue with ${selectedCount} post${selectedCount === 1 ? "" : "s"}`}
+                  </button>
+                )}
+                {error && <div className="error">{error}</div>}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="step-body">
+              <button
+                className="back-link"
+                onClick={() => setStep("select")}
+                disabled={generating}
+                title={generating ? "Finish generating first" : "Back to post selection"}
+              >
+                ← {selectedCount} post{selectedCount === 1 ? "" : "s"} selected
+              </button>
+              <h2 className="col-title">Output</h2>
+              <SettingsPanel settings={settings} onChange={setSettings} />
+            </div>
+            <div className="step-actions">
+              <button
+                className="primary generate"
+                disabled={generating || selectedCount === 0}
+                onClick={generate}
+              >
+                {generating ? "Generating…" : `Generate ${settings.format.toUpperCase()}`}
+              </button>
+              {output && !generating && (
+                <button className="secondary" onClick={exportOutput}>
+                  {`Save ${output.format.toUpperCase()}…`}
+                </button>
+              )}
+              {progress && <div className="progress">{progress}</div>}
+              {error && <div className="error">{error}</div>}
+            </div>
+          </>
+        )}
       </aside>
 
       <main className="col col-preview">
         <Preview output={output} />
       </main>
+
+      {showLog && <LogPane onClose={() => setShowLog(false)} />}
 
       {showSettings && (
         <SettingsModal
@@ -376,6 +473,28 @@ export default function App() {
         />
       )}
     </div>
+  );
+}
+
+function LogIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect
+        x="3"
+        y="4"
+        width="18"
+        height="16"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M7 9h4M7 13h10M7 17h7"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

@@ -9,10 +9,13 @@
 //! can scrape a linked article — optionally extracting only specific CSS
 //! selectors / DIVs — instead of the user paying tokens for whole pages.
 
+use crate::log;
+use futures::StreamExt;
 use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tauri::AppHandle;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -24,14 +27,21 @@ const MAX_CONTENT_CHARS: usize = 60_000;
 const MAX_TOOL_ROUNDS: usize = 6;
 /// Cap on each tool result handed back to the model.
 const MAX_TOOL_OUTPUT_CHARS: usize = 20_000;
+/// Pages fetched at once. A link roundup can ask for a dozen in one turn;
+/// firing them all together buries the machine and looks like a stall.
+const MAX_CONCURRENT_FETCHES: usize = 4;
 /// Cap on fetched page size before parsing.
 const MAX_FETCH_CHARS: usize = 2_000_000;
 
 const CONNECT_TIMEOUT_SECS: u64 = 20;
 /// A long newsletter on Haiku is well inside this; it exists so a stalled
 /// connection can't wedge a whole digest run.
-const REQUEST_TIMEOUT_SECS: u64 = 300;
+const REQUEST_TIMEOUT_SECS: u64 = 120;
 const FETCH_TIMEOUT_SECS: u64 = 45;
+/// Whole-run ceiling for one newsletter. Six rounds of model calls and page
+/// fetches can otherwise add up to something indistinguishable from a hang;
+/// past this the run gives up and the caller falls back to normal parsing.
+const AGENT_BUDGET_SECS: u64 = 240;
 /// Idle pooled connections are retired early, before the far end drops them.
 /// Reusing a keep-alive connection that has just gone away is the usual cause
 /// of a bare "error sending request": the POST fails and, not being idempotent,
@@ -168,12 +178,13 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1).min(4)))
 }
 
-async fn call(api_key: &str, body: Value) -> Result<Value, String> {
+async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<Value, String> {
     if api_key.trim().is_empty() {
         return Err("no Anthropic API key set".to_string());
     }
     let mut attempt: u32 = 1;
     loop {
+        let started = Instant::now();
         let sent = http()
             .post(ANTHROPIC_URL)
             .header("x-api-key", api_key.trim())
@@ -187,12 +198,32 @@ async fn call(api_key: &str, body: Value) -> Result<Value, String> {
             // often a keep-alive connection the far end had already closed, or
             // a brief network drop — so the call is worth repeating.
             Err(e) if attempt < MAX_ATTEMPTS && (e.is_connect() || e.is_timeout() || e.is_request()) => {
-                tokio::time::sleep(backoff(attempt)).await;
+                let wait = backoff(attempt);
+                log::warn(
+                    app,
+                    "agent",
+                    format!(
+                        "API attempt {attempt}/{MAX_ATTEMPTS} failed after {:.1}s ({}); retrying in {:.1}s",
+                        started.elapsed().as_secs_f32(),
+                        describe(&e),
+                        wait.as_secs_f32()
+                    ),
+                );
+                tokio::time::sleep(wait).await;
                 attempt += 1;
             }
             Err(e) => return Err(format!("Anthropic request failed: {}", describe(&e))),
             Ok(resp) if attempt < MAX_ATTEMPTS && retriable(resp.status()) => {
+                let status = resp.status();
                 let wait = retry_after(&resp).unwrap_or_else(|| backoff(attempt));
+                log::warn(
+                    app,
+                    "agent",
+                    format!(
+                        "API returned {status} on attempt {attempt}/{MAX_ATTEMPTS}; retrying in {:.1}s",
+                        wait.as_secs_f32()
+                    ),
+                );
                 tokio::time::sleep(wait).await;
                 attempt += 1;
             }
@@ -205,8 +236,20 @@ async fn call(api_key: &str, body: Value) -> Result<Value, String> {
                 if !status.is_success() {
                     return Err(error_message(status, &text));
                 }
-                return serde_json::from_str(&text)
-                    .map_err(|e| format!("bad Anthropic response: {e}"));
+                let value: Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("bad Anthropic response: {e}"))?;
+                log::info(
+                    app,
+                    "agent",
+                    format!(
+                        "API replied in {:.1}s ({} in / {} out tokens, stop: {})",
+                        started.elapsed().as_secs_f32(),
+                        value["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                        value["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                        value["stop_reason"].as_str().unwrap_or("?")
+                    ),
+                );
+                return Ok(value);
             }
         }
     }
@@ -226,13 +269,14 @@ fn extract_text(resp: &Value) -> String {
 
 /// Validates an API key with a tiny request; returns a status string.
 #[tauri::command]
-pub async fn anthropic_test(api_key: String) -> Result<String, String> {
+pub async fn anthropic_test(app: AppHandle, api_key: String) -> Result<String, String> {
     let body = json!({
         "model": MODEL,
         "max_tokens": 16,
         "messages": [{ "role": "user", "content": "Reply with the single word: ok" }],
     });
-    call(&api_key, body).await?;
+    log::info(&app, "agent", "Testing API key");
+    call(&app, &api_key, body).await?;
     Ok("Connected (Claude Haiku 4.5)".to_string())
 }
 
@@ -240,11 +284,42 @@ pub async fn anthropic_test(api_key: String) -> Result<String, String> {
 /// `fetch_page` tool loop as needed.
 #[tauri::command]
 pub async fn anthropic_process(
+    app: AppHandle,
     api_key: String,
     instructions: String,
     subject: String,
     content: String,
 ) -> Result<String, String> {
+    // A stalled run is indistinguishable from a hung app, so cap the whole
+    // thing; the caller falls back to the default parser on failure.
+    match tokio::time::timeout(
+        Duration::from_secs(AGENT_BUDGET_SECS),
+        run_agent(&app, api_key, instructions, subject.clone(), content),
+    )
+    .await
+    {
+        Ok(result) => {
+            if let Err(e) = &result {
+                log::error(&app, "agent", format!("\"{subject}\" failed: {e}"));
+            }
+            result
+        }
+        Err(_) => {
+            let msg = format!("gave up after {AGENT_BUDGET_SECS}s on \"{subject}\"");
+            log::error(&app, "agent", msg.clone());
+            Err(msg)
+        }
+    }
+}
+
+async fn run_agent(
+    app: &AppHandle,
+    api_key: String,
+    instructions: String,
+    subject: String,
+    content: String,
+) -> Result<String, String> {
+    let started = Instant::now();
     let trimmed: String = content.chars().take(MAX_CONTENT_CHARS).collect();
     let instr = instructions.trim();
     let user = format!(
@@ -254,9 +329,25 @@ pub async fn anthropic_process(
         trimmed
     );
 
+    log::info(
+        app,
+        "agent",
+        format!(
+            "Starting \"{}\" — {} chars of email{}",
+            subject.trim(),
+            trimmed.chars().count(),
+            if instr.is_empty() {
+                String::new()
+            } else {
+                format!(", instructions: {}", log::ellipsize(instr, 120))
+            }
+        ),
+    );
+
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": user })];
 
-    for _ in 0..MAX_TOOL_ROUNDS {
+    for round in 1..=MAX_TOOL_ROUNDS {
+        log::info(app, "agent", format!("Round {round}/{MAX_TOOL_ROUNDS}: asking the model"));
         let body = json!({
             "model": MODEL,
             "max_tokens": 8000,
@@ -265,7 +356,7 @@ pub async fn anthropic_process(
             "tools": tools(),
             "messages": messages,
         });
-        let resp = call(&api_key, body).await?;
+        let resp = call(app, &api_key, body).await?;
         let stop = resp["stop_reason"].as_str().unwrap_or("");
 
         if stop == "refusal" {
@@ -283,14 +374,24 @@ pub async fn anthropic_process(
                 .map(|b| (b["id"].as_str().unwrap_or("").to_string(), b.clone()))
                 .collect();
 
-            let results = futures::future::join_all(calls.into_iter().map(|(id, block)| async move {
-                match run_tool(&block).await {
-                    Ok(text) => json!({ "type": "tool_result", "tool_use_id": id, "content": text }),
-                    Err(e) => {
-                        json!({ "type": "tool_result", "tool_use_id": id, "content": e, "is_error": true })
+            log::info(
+                app,
+                "agent",
+                format!("Round {round}: {} page fetch(es) requested", calls.len()),
+            );
+
+            let results: Vec<Value> = futures::stream::iter(calls.into_iter().map(
+                |(id, block)| async move {
+                    match run_tool(app, &block).await {
+                        Ok(text) => json!({ "type": "tool_result", "tool_use_id": id, "content": text }),
+                        Err(e) => {
+                            json!({ "type": "tool_result", "tool_use_id": id, "content": e, "is_error": true })
+                        }
                     }
-                }
-            }))
+                },
+            ))
+            .buffered(MAX_CONCURRENT_FETCHES)
+            .collect()
             .await;
 
             messages.push(json!({ "role": "user", "content": results }));
@@ -300,18 +401,30 @@ pub async fn anthropic_process(
         // Terminal turn — return the Markdown it produced.
         let markdown = extract_text(&resp);
         if markdown.trim().is_empty() {
-            return Err("the agent returned no content".to_string());
+            return Err(format!("the agent returned no content (stop reason: {stop})"));
         }
+        log::info(
+            app,
+            "agent",
+            format!(
+                "Finished \"{}\" in {:.1}s: {} chars of Markdown",
+                subject.trim(),
+                started.elapsed().as_secs_f32(),
+                markdown.chars().count()
+            ),
+        );
         return Ok(markdown);
     }
 
-    Err("the agent exceeded its tool-call budget without finishing".to_string())
+    Err(format!(
+        "the agent still wanted more pages after {MAX_TOOL_ROUNDS} rounds; giving up"
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Tools
 
-async fn run_tool(block: &Value) -> Result<String, String> {
+async fn run_tool(app: &AppHandle, block: &Value) -> Result<String, String> {
     let name = block["name"].as_str().unwrap_or("");
     let input = &block["input"];
     match name {
@@ -319,7 +432,36 @@ async fn run_tool(block: &Value) -> Result<String, String> {
             let url = input["url"].as_str().ok_or("fetch_page: missing 'url'")?;
             let selector = input["selector"].as_str().filter(|s| !s.trim().is_empty());
             let as_html = input["as_html"].as_bool().unwrap_or(false);
-            fetch_page(url, selector, as_html).await
+            let started = Instant::now();
+            log::info(
+                app,
+                "fetch",
+                format!(
+                    "GET {}{}{}",
+                    log::ellipsize(url, 120),
+                    selector.map(|s| format!(" [{s}]")).unwrap_or_default(),
+                    if as_html { " (html)" } else { "" }
+                ),
+            );
+            let result = fetch_page(url, selector, as_html).await;
+            match &result {
+                Ok(text) => log::info(
+                    app,
+                    "fetch",
+                    format!(
+                        "{} chars in {:.1}s from {}",
+                        text.chars().count(),
+                        started.elapsed().as_secs_f32(),
+                        log::ellipsize(url, 90)
+                    ),
+                ),
+                Err(e) => log::warn(
+                    app,
+                    "fetch",
+                    format!("{e} after {:.1}s — {}", started.elapsed().as_secs_f32(), log::ellipsize(url, 90)),
+                ),
+            }
+            result
         }
         other => Err(format!("unknown tool: {other}")),
     }

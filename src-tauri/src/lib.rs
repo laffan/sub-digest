@@ -1,5 +1,6 @@
 mod anthropic;
 mod gmail;
+mod log;
 mod oauth;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
