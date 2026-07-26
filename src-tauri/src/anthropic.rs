@@ -5,10 +5,12 @@
 //! instructions; this module runs the transform and returns clean Markdown,
 //! which the frontend converts into layout blocks.
 //!
-//! It runs in two passes with the fetching in between: the model names the
-//! newsletter's links (structured output), this module resolves and scrapes
-//! them, and a second call writes the entry from what came back. Deciding which
-//! URL to actually read is deliberately code's job, not the model's.
+//! There is exactly one model call, and its only job is naming the newsletter's
+//! links (structured output). Everything after that is code: this module
+//! resolves each link, scrapes the article as Markdown, and assembles the entry
+//! from what came back. The model never writes a word of the digest — having it
+//! retype the scraped articles cost 30-80s per newsletter and bought nothing,
+//! since the text was already in hand.
 
 use crate::log;
 use futures::StreamExt;
@@ -24,8 +26,11 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// capture-only prompt it reformats/scrapes without inventing content.
 const MODEL: &str = "claude-haiku-4-5";
 const MAX_CONTENT_CHARS: usize = 60_000;
-/// Cap on each fetched page handed back to the model.
-const MAX_TOOL_OUTPUT_CHARS: usize = 20_000;
+/// Cap on one scraped article. This used to be 20k because every character was
+/// about to be spent as model input *and* re-emitted as output; now the text
+/// goes straight into the digest, so it only has to be long enough that a piece
+/// of long-form journalism arrives whole.
+const MAX_ARTICLE_CHARS: usize = 60_000;
 /// Pages fetched at once. A link roundup can ask for a dozen in one turn;
 /// firing them all together buries the machine and looks like a stall.
 const MAX_CONCURRENT_FETCHES: usize = 4;
@@ -41,9 +46,9 @@ const FETCH_TIMEOUT_SECS: u64 = 45;
 /// keeps traffic flowing, so a silence this long is a real stall rather than
 /// the model thinking.
 const READ_TIMEOUT_SECS: u64 = 45;
-/// Whole-run ceiling for one newsletter. Six rounds of model calls and page
-/// fetches can otherwise add up to something indistinguishable from a hang;
-/// past this the run gives up and the caller falls back to normal parsing.
+/// Whole-run ceiling for one newsletter: one model call plus a round of page
+/// fetches. Past this the run gives up and the caller falls back to normal
+/// parsing, rather than leaving something indistinguishable from a hang.
 const AGENT_BUDGET_SECS: u64 = 240;
 /// Total tries per API call, matching what the Anthropic SDKs do by default.
 const MAX_ATTEMPTS: u32 = 3;
@@ -72,36 +77,6 @@ empty.\n\
 links to fill it.\n\n\
 If the per-newsletter instructions name a CSS selector to pull content out of \
 the linked pages, return it as `selector`; otherwise return an empty string.";
-
-const SYSTEM_PROMPT: &str = "You assemble one email newsletter into clean Markdown \
-for a printed reading digest. You are given the raw email (HTML or plain text), \
-optional per-newsletter instructions, and the text of the pages its links point \
-to, already fetched for you.\n\n\
-ABSOLUTE RULE — capture only, never invent:\n\
-- Every word you output must come verbatim from the provided email or from the \
-fetched pages below it. Do NOT write anything from your own knowledge, memory, \
-or imagination.\n\
-- Use only the fetched text supplied here. Never reconstruct, guess, paraphrase, \
-or 'fill in' an article whose text is not present.\n\
-- If a page could not be fetched, output the item's title followed by \
-'(content unavailable)'. Do NOT fabricate a substitute.\n\
-- Add no opinions, commentary, introductions, transitions, or embellishments of \
-your own. Do not summarize unless the instructions explicitly ask; when you must \
-condense, use only wording drawn from the source.\n\n\
-Output format:\n\
-- Output GitHub-flavored Markdown only: no preamble, no explanation, no code \
-fences wrapping the whole answer.\n\
-- Do NOT include the newsletter's title or a top-level # heading; the digest adds \
-its own header.\n\
-- Use ## and ### for section headings, - for bullet lists, 1. for numbered lists, \
-> for quotes, ![](url) for images worth keeping, and --- for a divider.\n\
-- For link-roundup newsletters, render each item as a list entry: the linked \
-title in bold, the destination URL in parentheses if present, then any \
-description the source itself provides.\n\
-- Strip navigation, subscribe/unsubscribe prompts, social-share buttons, \
-'view in browser', paid-upgrade CTAs, comment/like widgets, and footers/legal.\n\n\
-Per-newsletter instructions, when present, take priority over these formatting \
-defaults — but the ABSOLUTE RULE always holds.";
 
 /// The shape the link pass must return. Structured outputs require
 /// `additionalProperties: false` on every object and every property listed in
@@ -149,6 +124,15 @@ struct LinkItem {
     title: String,
     url: String,
     note: String,
+}
+
+/// One scraped page: the URL the text actually came from — after the redirect
+/// wrapper and the query-string retry, so it's the article's own address rather
+/// than the newsletter's — and the page as Markdown.
+#[derive(Debug, Clone)]
+struct Article {
+    url: String,
+    markdown: String,
 }
 
 /// Dedicated HTTP client (no default UA — set per request for scraping).
@@ -469,7 +453,7 @@ async fn run_agent(
         ),
     );
 
-    // Pass 1 — the model's only job is naming the links.
+    // The one model call. Its only job is naming the links.
     let links_started = Instant::now();
     let (links, selector) = extract_links(app, &api_key, &user).await?;
     let links_secs = links_started.elapsed().as_secs_f32();
@@ -514,7 +498,8 @@ async fn run_agent(
         log::info(app, "agent", format!("Using selector from instructions: {sel}"));
     }
 
-    // Pass 2 — we do the fetching, so the URL we retrieve is one we can see.
+    // The scraper takes it from here. We do the fetching, so the URL we
+    // retrieve is one we can see.
     let fetch_started = Instant::now();
     log::info(
         app,
@@ -525,10 +510,10 @@ async fn run_agent(
         ),
     );
     let sel = selector.as_deref();
-    let articles: Vec<(LinkItem, Result<String, String>)> =
+    let articles: Vec<(LinkItem, Result<Article, String>)> =
         futures::stream::iter(links.into_iter().map(|link| async move {
-            let text = resolve_and_fetch(app, &link.url, sel).await;
-            (link, text)
+            let article = resolve_and_fetch(app, &link.url, sel).await;
+            (link, article)
         }))
         .buffered(MAX_CONCURRENT_FETCHES)
         .collect()
@@ -539,7 +524,7 @@ async fn run_agent(
     let scraped: usize = articles
         .iter()
         .filter_map(|(_, r)| r.as_ref().ok())
-        .map(|t| t.chars().count())
+        .map(|a| a.markdown.chars().count())
         .sum();
     log::info(
         app,
@@ -550,69 +535,26 @@ async fn run_agent(
         ),
     );
 
-    // Pass 3 — assemble the Markdown from the email plus what was fetched.
-    let mut dossier = String::from("Fetched pages for the newsletter's links:\n");
-    for (i, (link, text)) in articles.iter().enumerate() {
-        dossier.push_str(&format!("\n--- Item {} ---\nTitle: {}\nURL: {}\n", i + 1, link.title, link.url));
-        if !link.note.trim().is_empty() {
-            dossier.push_str(&format!("Newsletter's note: {}\n", link.note));
-        }
-        match text {
-            Ok(body) => dossier.push_str(&format!("Page text:\n{body}\n")),
-            Err(e) => dossier.push_str(&format!("Page text: (content unavailable — {e})\n")),
-        }
+    // The entry is built here, in code, out of what the scraper returned. The
+    // model is not asked to write it: the article text already exists, and
+    // having it retyped a token at a time was the whole of the old runtime.
+    if fetched == 0 {
+        return Err(format!(
+            "none of the {} linked page(s) could be scraped",
+            articles.len()
+        ));
     }
-
-    let prompt = format!("{user}\n\n{dossier}");
-    let body = json!({
-        "model": MODEL,
-        "max_tokens": 8000,
-        "temperature": 0, // deterministic, faithful capture — no creative drift
-        "system": SYSTEM_PROMPT,
-        "messages": [{ "role": "user", "content": &prompt }],
-    });
+    let assemble_started = Instant::now();
+    let markdown = assemble(&articles);
+    let assemble_secs = assemble_started.elapsed().as_secs_f32();
     log::info(
         app,
         "agent",
         format!(
-            "Assembling the digest entry from {scraped} chars of scraped text + {} chars of email",
-            trimmed.chars().count()
+            "Assembled the entry in code from {fetched} scraped page(s) — {} chars of Markdown, no model call",
+            markdown.chars().count()
         ),
     );
-    let assemble_started = Instant::now();
-    let mut msg = call(app, &api_key, body).await?;
-    let assemble_secs = assemble_started.elapsed().as_secs_f32();
-    if msg.stop_reason == "refusal" {
-        return Err("the model declined to process this newsletter".to_string());
-    }
-
-    let markdown = std::mem::take(&mut msg.text);
-    if markdown.trim().is_empty() {
-        return Err(format!(
-            "the agent returned no content (stop reason: {})",
-            if msg.stop_reason.is_empty() { "?" } else { &msg.stop_reason }
-        ));
-    }
-
-    // Where the assembled entry actually came from. The prompt forbids invention,
-    // so a high share is the system working — but it also means the model is
-    // retyping the scrape one token at a time, which is what the generation
-    // seconds below are being spent on.
-    if let Some(share) = verbatim_share(&markdown, &prompt) {
-        log::info(
-            app,
-            "agent",
-            format!(
-                "Assembled entry is {:.0}% verbatim from the material it was given ({} chars out of {} chars in), \
-                 written at {:.0} tok/s over {:.1}s of generation",
-                share * 100.0,
-                markdown.chars().count(),
-                prompt.chars().count(),
-                msg.tokens_per_sec(),
-                (assemble_secs - msg.first_token_secs).max(0.0),
-            ),
-        );
-    }
 
     let total = started.elapsed().as_secs_f32();
     let pct = |secs: f32| if total > 0.0 { secs / total * 100.0 } else { 0.0 };
@@ -675,43 +617,40 @@ fn quoted_verbatim(email: &str, url: &str) -> bool {
     email.contains(url) || email.replace("&amp;", "&").contains(url)
 }
 
-/// Words compared for provenance: case- and punctuation-insensitive, so
-/// Markdown's own `**bold**` and `>` markers don't read as new writing.
-fn words(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .map(|w| {
-            w.chars()
-                .filter(|c| c.is_alphanumeric())
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
-        .filter(|w| !w.is_empty())
-        .collect()
-}
-
-fn hash(words: &[String]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    words.hash(&mut h);
-    h.finish()
-}
-
-/// Runs of this many words. Long enough that ordinary phrasing doesn't collide,
-/// short enough that a reordered sentence still registers as copied.
-const RUN_LEN: usize = 8;
-
-/// The share of the output's word-runs that also occur in the source material —
-/// how much of what the model wrote it was copying. `None` when the output is
-/// too short to measure.
-fn verbatim_share(output: &str, source: &str) -> Option<f32> {
-    let out = words(output);
-    if out.len() < RUN_LEN {
-        return None;
+/// Builds the digest entry: one section per link, each headed by the title the
+/// newsletter gave it, followed by the article as the scraper read it.
+///
+/// Everything here is copied, never composed — which is what the model was
+/// being asked to do too, only one token at a time.
+fn assemble(articles: &[(LinkItem, Result<Article, String>)]) -> String {
+    let mut out = String::new();
+    for (link, article) in articles {
+        if !out.is_empty() {
+            out.push_str("\n---\n\n");
+        }
+        let title = match link.title.trim() {
+            "" => link.url.as_str(),
+            t => t,
+        };
+        out.push_str(&format!("## {title}\n\n"));
+        // The source the text actually came from — the resolved article, not
+        // the newsletter's redirect wrapper.
+        match article {
+            Ok(a) => out.push_str(&format!("{}\n\n", a.url)),
+            Err(_) => out.push_str(&format!("{}\n\n", link.url)),
+        }
+        if !link.note.trim().is_empty() {
+            out.push_str(&format!("> {}\n\n", normalize(&link.note)));
+        }
+        match article {
+            Ok(a) => {
+                out.push_str(a.markdown.trim());
+                out.push('\n');
+            }
+            Err(e) => out.push_str(&format!("(content unavailable — {e})\n")),
+        }
     }
-    let seen: std::collections::HashSet<u64> = words(source).windows(RUN_LEN).map(hash).collect();
-    let total = out.len() - RUN_LEN + 1;
-    let hits = out.windows(RUN_LEN).filter(|w| seen.contains(&hash(w))).count();
-    Some(hits as f32 / total as f32)
+    out
 }
 
 /// Reads the link pass's JSON back into link items. The schema guarantees the
@@ -758,7 +697,7 @@ async fn resolve_and_fetch(
     app: &AppHandle,
     requested: &str,
     selector: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Article, String> {
     let started = Instant::now();
     log::info(app, "fetch", format!("GET {}", log::ellipsize(requested, 140)));
 
@@ -790,7 +729,7 @@ async fn resolve_and_fetch(
                         started.elapsed().as_secs_f32()
                     ),
                 );
-                return Ok(clean_text);
+                return Ok(Article { url: bare.to_string(), markdown: clean_text });
             }
             Ok(_) => log::warn(app, "fetch", "  bare URL returned nothing; keeping the original"),
             Err(e) => log::warn(app, "fetch", format!("  bare URL failed ({e}); keeping the original")),
@@ -807,7 +746,7 @@ async fn resolve_and_fetch(
             started.elapsed().as_secs_f32()
         ),
     );
-    Ok(text)
+    Ok(Article { url: landed.to_string(), markdown: text })
 }
 
 /// The same URL without its query string or fragment, or None when there was
@@ -872,45 +811,50 @@ async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, Strin
     };
 
     // Parse + extract synchronously (scraper's Html isn't Send; no awaits here).
-    let out = extract(&body, selector, false)?;
+    let out = extract(&body, selector)?;
     Ok((landed, truncate_output(out)))
 }
 
-fn extract(html: &str, selector: Option<&str>, as_html: bool) -> Result<String, String> {
+/// Tags that carry a page's readable content. `script`, `style` and `nav` are
+/// not among them, so their text never reaches the digest.
+const CONTENT_TAGS: &str = "p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption";
+
+/// Reads a page as Markdown. This used to return one flat run of text, because
+/// its only reader was a model that would restate it; now the result goes into
+/// the digest as it stands, so the page's own structure — headings, lists,
+/// quotes — has to survive the trip.
+fn extract(html: &str, selector: Option<&str>) -> Result<String, String> {
     let doc = scraper::Html::parse_document(html);
+    let content = scraper::Selector::parse(CONTENT_TAGS).expect("static selector");
 
-    if let Some(sel) = selector {
-        let parsed = scraper::Selector::parse(sel)
-            .map_err(|e| format!("invalid CSS selector '{sel}': {e:?}"))?;
-        let mut parts = Vec::new();
-        for el in doc.select(&parsed) {
-            if as_html {
-                parts.push(el.inner_html());
-            } else {
-                let text = normalize(&el.text().collect::<Vec<_>>().join(" "));
-                if !text.is_empty() {
-                    parts.push(text);
-                }
+    let picked: Vec<scraper::ElementRef> = match selector {
+        Some(sel) => {
+            let parsed = scraper::Selector::parse(sel)
+                .map_err(|e| format!("invalid CSS selector '{sel}': {e:?}"))?;
+            let roots: Vec<_> = doc.select(&parsed).collect();
+            if roots.is_empty() {
+                return Err(format!("no elements matched selector '{sel}'"));
             }
+            let inner: Vec<_> = roots.iter().flat_map(|r| r.select(&content)).collect();
+            // A selector can name the text-bearing element itself, in which
+            // case there is nothing further inside it to pick out.
+            if inner.is_empty() { roots } else { inner }
         }
-        if parts.is_empty() {
-            return Err(format!("no elements matched selector '{sel}'"));
-        }
-        return Ok(parts.join("\n\n"));
-    }
+        None => doc.select(&content).collect(),
+    };
 
-    // No selector: readable text from content tags (naturally excludes script/style/nav).
-    let content = scraper::Selector::parse("p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption")
-        .expect("static selector");
-    let mut parts = Vec::new();
-    for el in doc.select(&content) {
-        let text = normalize(&el.text().collect::<Vec<_>>().join(" "));
-        if !text.is_empty() {
-            parts.push(text);
-        }
-    }
-    if !parts.is_empty() {
-        return Ok(parts.join("\n"));
+    // These tags nest — a `blockquote` holds `p`s, an `li` can hold anything —
+    // and every level matches, so an element already covered by an ancestor
+    // would otherwise have its text emitted twice.
+    let chosen: std::collections::HashSet<_> = picked.iter().map(|el| el.id()).collect();
+    let blocks: Vec<String> = picked
+        .iter()
+        .filter(|el| !el.ancestors().any(|a| chosen.contains(&a.id())))
+        .filter_map(|el| as_markdown(*el))
+        .collect();
+
+    if !blocks.is_empty() {
+        return Ok(join_blocks(&blocks));
     }
     // Fallback: whole-body text.
     let body = scraper::Selector::parse("body").expect("static selector");
@@ -923,13 +867,48 @@ fn extract(html: &str, selector: Option<&str>, as_html: bool) -> Result<String, 
     Err("no readable text found on the page".to_string())
 }
 
+/// One content element as a Markdown block, or None when it holds no text.
+fn as_markdown(el: scraper::ElementRef) -> Option<String> {
+    let text = normalize(&el.text().collect::<Vec<_>>().join(" "));
+    if text.is_empty() {
+        return None;
+    }
+    let name = el.value().name();
+    Some(match name {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            // The entry already gives each article an `##` of its own, so the
+            // page's own headings hang below that rather than competing with it.
+            let depth = name[1..].parse::<usize>().unwrap_or(1);
+            format!("{} {text}", "#".repeat((depth + 2).min(6)))
+        }
+        "li" => format!("- {text}"),
+        "blockquote" => format!("> {text}"),
+        _ => text,
+    })
+}
+
+/// Joins blocks with the blank line Markdown needs between them — except
+/// between consecutive list items, where a blank line would split one list
+/// into several.
+fn join_blocks(blocks: &[String]) -> String {
+    let mut out = String::new();
+    for (i, block) in blocks.iter().enumerate() {
+        if i > 0 {
+            let same_list = block.starts_with("- ") && blocks[i - 1].starts_with("- ");
+            out.push_str(if same_list { "\n" } else { "\n\n" });
+        }
+        out.push_str(block);
+    }
+    out
+}
+
 fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn truncate_output(mut s: String) -> String {
-    if s.chars().count() > MAX_TOOL_OUTPUT_CHARS {
-        s = s.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    if s.chars().count() > MAX_ARTICLE_CHARS {
+        s = s.chars().take(MAX_ARTICLE_CHARS).collect();
         s.push_str("\n…[truncated]");
     }
     s
@@ -954,7 +933,7 @@ mod tests {
 
     #[test]
     fn extracts_selector_text() {
-        let out = extract(PAGE, Some(".post-content"), false).unwrap();
+        let out = extract(PAGE, Some(".post-content")).unwrap();
         assert!(out.contains("First paragraph of the article."));
         assert!(out.contains("Second paragraph here."));
         assert!(!out.contains("sidebar"));
@@ -962,14 +941,8 @@ mod tests {
     }
 
     #[test]
-    fn extracts_selector_html() {
-        let out = extract(PAGE, Some("article"), true).unwrap();
-        assert!(out.contains("<p>First paragraph of the article.</p>"));
-    }
-
-    #[test]
     fn readable_text_skips_chrome_and_scripts() {
-        let out = extract(PAGE, None, false).unwrap();
+        let out = extract(PAGE, None).unwrap();
         assert!(out.contains("The Headline"));
         assert!(out.contains("First paragraph of the article."));
         assert!(!out.contains("noise")); // no <script> body
@@ -978,7 +951,83 @@ mod tests {
 
     #[test]
     fn missing_selector_errors() {
-        assert!(extract(PAGE, Some(".does-not-exist"), false).is_err());
+        assert!(extract(PAGE, Some(".does-not-exist")).is_err());
+    }
+
+    /// The scraped page goes into the digest as it stands, so its shape has to
+    /// come back as Markdown the layout can read — and each piece of text has
+    /// to appear exactly once, though these tags nest inside one another.
+    #[test]
+    fn scrapes_a_page_into_markdown() {
+        let page = r#"<html><body><article>
+            <h1>The Headline</h1>
+            <p>Opening paragraph.</p>
+            <h2>A Section</h2>
+            <ul><li>First point</li><li>Second point</li></ul>
+            <blockquote><p>A quoted line.</p></blockquote>
+            <p>Closing paragraph.</p>
+        </article></body></html>"#;
+
+        let out = extract(page, None).unwrap();
+        assert_eq!(
+            out,
+            "### The Headline\n\n\
+             Opening paragraph.\n\n\
+             #### A Section\n\n\
+             - First point\n- Second point\n\n\
+             > A quoted line.\n\n\
+             Closing paragraph."
+        );
+        // The `p` inside the blockquote must not also stand on its own.
+        assert_eq!(out.matches("A quoted line.").count(), 1);
+    }
+
+    /// A selector naming the text-bearing element itself still yields its text.
+    #[test]
+    fn selector_on_a_leaf_element_still_reads() {
+        let page = r#"<html><body><p class="lede">Just the one line.</p></body></html>"#;
+        assert_eq!(extract(page, Some(".lede")).unwrap(), "Just the one line.");
+    }
+
+    /// One section per link, headed by the newsletter's own title, carrying the
+    /// resolved URL rather than the redirect wrapper — and a failed fetch says
+    /// so rather than being dropped or filled in.
+    #[test]
+    fn assembles_an_entry_from_the_scrape() {
+        let articles = vec![
+            (
+                LinkItem {
+                    title: "The Greatness Of David Lean".into(),
+                    url: "https://thebrowser.com/r/abc?m=1".into(),
+                    note: "On Lawrence.".into(),
+                },
+                Ok(Article {
+                    url: "https://example.com/lean".into(),
+                    markdown: "### Lean\n\nHe made big films.".into(),
+                }),
+            ),
+            (
+                LinkItem {
+                    title: "Rain Robbers".into(),
+                    url: "https://thebrowser.com/r/def?m=1".into(),
+                    note: String::new(),
+                },
+                Err("fetch failed: HTTP 403 Forbidden".into()),
+            ),
+        ];
+
+        let out = assemble(&articles);
+        assert_eq!(
+            out,
+            "## The Greatness Of David Lean\n\n\
+             https://example.com/lean\n\n\
+             > On Lawrence.\n\n\
+             ### Lean\n\nHe made big films.\n\
+             \n---\n\n\
+             ## Rain Robbers\n\n\
+             https://thebrowser.com/r/def?m=1\n\n\
+             (content unavailable — fetch failed: HTTP 403 Forbidden)\n"
+        );
     }
 
     /// The newsletter case this pipeline exists for: a redirect wrapper lands
@@ -1072,25 +1121,6 @@ mod tests {
         // Same link, entity-decoded the way a model tends to write it back.
         assert!(quoted_verbatim(email, "https://thebrowser.com/r/abc?m=1&utm=x"));
         assert!(!quoted_verbatim(email, "https://thebrowser.com/r/invented"));
-    }
-
-    /// What the assemble pass is actually doing: near-total copying reads as
-    /// near-total, and prose the model wrote itself reads as near-zero.
-    #[test]
-    fn measures_how_much_of_the_output_was_copied() {
-        let source = "The rain in Spain falls mainly on the plain, and the plain \
-                      is where the rain is measured every single morning by hand.";
-
-        let copied = "**Rain** — the rain in Spain falls mainly on the plain, and the plain \
-                      is where the rain is measured every single morning by hand.";
-        assert!(verbatim_share(copied, source).unwrap() > 0.9);
-
-        let novel = "Quarterly logistics throughput improved once the depot switched \
-                     carriers, though nobody in procurement could say precisely why.";
-        assert!(verbatim_share(novel, source).unwrap() < 0.1);
-
-        // Too short to say anything about.
-        assert!(verbatim_share("no idea", source).is_none());
     }
 
     #[test]

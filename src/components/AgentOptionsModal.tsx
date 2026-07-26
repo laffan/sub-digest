@@ -9,10 +9,10 @@ interface Props {
 }
 
 const EXAMPLES = [
-  "This is a link roundup — list each linked article as a bullet with its one-line summary.",
-  "For each link, fetch the linked article and include its first two paragraphs under the title.",
-  "Fetch each link and extract only the .post-content div; summarize it in 2-3 sentences.",
-  "Keep only the main essay; drop the 'what I'm reading' and recommendations sections.",
+  "Take every article this roundup recommends.",
+  "Only the articles in the main list — skip the 'also worth reading' section at the end.",
+  "Take each linked article, and pull its content from the .post-content div.",
+  "Skip anything on the publication's own site; take only the outside links.",
 ];
 
 export function AgentOptionsModal({
@@ -45,10 +45,10 @@ export function AgentOptionsModal({
           </button>
         </div>
         <p className="hint">
-          Instructions for how the agent should handle posts from{" "}
-          <strong>{publication}</strong>. Describe what to keep, drop, or reshape. The agent can
-          also fetch a linked page and pull just the content it needs — optionally from a specific
-          CSS selector / DIV — so you don't pay tokens for whole pages.
+          Which links the agent should take from posts by <strong>{publication}</strong>. The model
+          only picks out the articles; the app fetches each one and lays it into the digest as
+          scraped. Say which links count and which to skip, and name a CSS selector / DIV if the
+          linked pages need one to find their content.
         </p>
         {!hasKey && (
           <p className="hint warn">
@@ -60,7 +60,7 @@ export function AgentOptionsModal({
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={6}
-          placeholder="e.g. This is a link roundup — list each linked article as a bullet with a one-line summary."
+          placeholder="e.g. Take every article this roundup recommends."
           autoCapitalize="sentences"
           spellCheck
         />

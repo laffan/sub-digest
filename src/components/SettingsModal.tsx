@@ -121,10 +121,11 @@ export function SettingsModal({
 
         <h3 className="modal-section">AI agent (Anthropic)</h3>
         <p className="hint">
-          Some newsletters (link roundups, unusual layouts) parse poorly. Add an Anthropic API
-          key to let a per-newsletter agent reformat them. It runs on <strong>{AGENT_MODEL_LABEL}</strong>{" "}
-          and only reproduces content it reads or scrapes — no invented text. The key is stored
-          only on this device.
+          Link roundups parse poorly: you get a page of links instead of the reading. Add an
+          Anthropic API key to let a per-newsletter agent pick out the linked articles, which the
+          app then fetches and lays into the digest. The model runs on{" "}
+          <strong>{AGENT_MODEL_LABEL}</strong> and only ever names the links — every word in the
+          digest is scraped, never written. The key is stored only on this device.
         </p>
         <label>
           API key
