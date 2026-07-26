@@ -885,9 +885,36 @@ label.check {
   background: var(--bg);
 }
 
+/* No text selection mid-drag, and no click-through to the row underneath. */
+.toc.dragging .toc-row {
+  user-select: none;
+  cursor: grabbing;
+}
+
+/* The row being carried, and the line showing where it would land. */
+.toc-row.lifted {
+  opacity: 0.4;
+}
+
+.toc-row.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.toc-row.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 /* Everything in this entry is struck out, so nothing of it reaches the output. */
+.toc-row.emptied {
+  background: var(--strike-bg);
+}
+
+.toc-row.emptied:hover {
+  background: var(--strike-bg);
+}
+
 .toc-row.emptied .toc-text {
-  opacity: 0.45;
+  opacity: 0.5;
   text-decoration: line-through;
 }
 
@@ -929,26 +956,46 @@ label.check {
   margin-top: 2px;
 }
 
-.toc-moves {
+.toc-actions {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 
-.move-btn {
+.grip,
+.trash-btn {
   width: 22px;
-  height: 18px;
+  height: 20px;
   padding: 0;
-  font-size: 11px;
-  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 4px;
   color: var(--muted);
 }
 
-.move-btn:not(:disabled):hover {
+.grip:hover,
+.trash-btn:hover {
   color: var(--ink);
   border-color: var(--muted);
+}
+
+/* The grip owns the pointer while dragging, so a finger on it must not also
+   scroll the list underneath. */
+.grip {
+  cursor: grab;
+  touch-action: none;
+}
+
+.toc.dragging .grip {
+  cursor: grabbing;
+}
+
+.trash-btn.active {
+  color: var(--strike-ink);
+  border-color: var(--strike-edge);
+  background: var(--strike-bg);
 }
 
 /* ---- Content preview (Organize step) ---- */

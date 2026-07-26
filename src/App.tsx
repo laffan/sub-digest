@@ -385,12 +385,14 @@ export default function App() {
   }, [posts, agentConfigs, anthropicKey, report, fail]);
 
   /** Reorders the digest; any document already generated no longer matches. */
-  const movePost = useCallback((index: number, delta: number) => {
+  const reorderPost = useCallback((from: number, to: number) => {
     setPrepared((prev) => {
-      const to = index + delta;
-      if (to < 0 || to >= prev.length) return prev;
+      if (from === to || from < 0 || from >= prev.length || to < 0 || to >= prev.length) {
+        return prev;
+      }
       const next = [...prev];
-      [next[index], next[to]] = [next[to], next[index]];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
       return next;
     });
     setOutput(null);
@@ -410,6 +412,24 @@ export default function App() {
   }, []);
 
   const restoreAll = useCallback(() => setRemoved(new Set()), []);
+
+  /**
+   * Takes a whole article out of the output, or puts it back. It's the same
+   * marking the strike-out tool does, applied to every block at once, so the
+   * entry reads as struck out in the preview too and nothing is really gone.
+   */
+  const toggleEntryRemoved = useCallback((post: DigestPost) => {
+    setRemoved((prev) => {
+      const next = new Set(prev);
+      const keys = post.blocks.map((_, i) => blockKey(post.id, i));
+      const alreadyGone = keys.every((key) => next.has(key));
+      for (const key of keys) {
+        if (alreadyGone) next.delete(key);
+        else next.add(key);
+      }
+      return next;
+    });
+  }, []);
 
   /** How many of an entry's blocks survive into the output. */
   const keptBlocks = useCallback(
@@ -558,10 +578,11 @@ export default function App() {
                 removing={removing}
                 removedCount={removed.size}
                 keptBlocks={keptBlocks}
-                onMove={movePost}
+                onReorder={reorderPost}
                 onFocus={(id) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }))}
                 onToggleRemoving={() => setRemoving((v) => !v)}
                 onRestoreAll={restoreAll}
+                onToggleEntry={toggleEntryRemoved}
               />
             </div>
             <div className="step-actions">

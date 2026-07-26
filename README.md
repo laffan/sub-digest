@@ -61,18 +61,20 @@ three steps in order, each with a link back:
    time, with progress at the top of the column and the running order below it.
    Each row is one entry in the digest — for agent-processed newsletters, one
    of the articles it linked to, listed under that article's title, byline and
-   address. **↑ ↓** sets where a row lands in the digest (it starts
-   chronological), and **clicking** one scrolls the preview to it. The content
-   accrues on the right as each post is read, so you can see what was actually
-   captured before generating anything.
+   address. **Drag** a row (by its grip, or from anywhere on it with a mouse)
+   to set where it lands in the digest; the order starts chronological.
+   **Clicking** a row scrolls the preview to it. The content accrues on the
+   right as each post is read, so you can see what was actually captured
+   before generating anything.
 
-   **Remove content** turns the pointer into a crosshair: drag across the
-   preview and the material you cover is marked in red — it's still there, and
-   still yours to adjust, but it won't reach the output. Hold **⌥** while
-   dragging to put material back, or **Restore** to clear every mark at once.
-   An entry struck out entirely drops from the digest, and its row says so.
-   Nothing is deleted, so stepping back here from Output finds every mark
-   where you left it.
+   Two ways to take material out, both provisional. The **trash** on a row
+   removes that whole article. **Remove content** turns the pointer into a
+   crosshair: drag across the preview and the material you cover is marked —
+   hold **⌥** while dragging to put it back. Either way what's removed turns
+   red rather than disappearing, so it's still there and still yours to
+   adjust; **Restore** clears every mark at once. An entry with nothing left
+   drops from the digest, and its row says so. Nothing is deleted, so stepping
+   back here from Output finds every mark where you left it.
 3. **Output** — format and its settings, then Generate.
 
 A selection can't change under a run that's already going. The preview on the
@@ -240,7 +242,8 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
-| Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark). Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
+| Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark); a row's trash marks every block of that entry at once, so both land in the same place. Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
+| Reordering | `src/components/OrganizePanel.tsx` | Pointer events rather than HTML5 drag-and-drop, which touch devices don't fire — so the same code reorders under a mouse on the Mac and a finger on the iPad. A press only becomes a drag past a 4px threshold, leaving a plain click free to mean "show me this entry" |
 | Log | `src/log.ts`, `src-tauri/src/log.rs` | Module-level store in the UI (any layer can write without prop drilling); the backend feeds it over a Tauri `log` event |
 | API transport | `src-tauri/src/anthropic.rs` | Responses are streamed (SSE), on a fresh HTTP/1.1 connection per request with no pooling — a silent request is what an idle-connection timeout kills, and a pooled or multiplexed connection carries that failure to the next call. First-token timing is logged, so a slow call can be told apart from a stalled one |
 
