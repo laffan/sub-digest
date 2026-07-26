@@ -30,9 +30,10 @@ import { dayEndMs, dayStartMs, isoLocalDay } from "./dates";
 import {
   CUSTOM_RANGE,
   DEFAULT_SETTINGS,
+  blockKey,
   outputFileName,
+  withRemovals,
   type AgentConfig,
-  type Block,
   type DateRange,
   type DigestPost,
   type GeneratedOutput,
@@ -108,16 +109,26 @@ export default function App() {
   // is settled before the next depends on it.
   const [step, setStep] = useState<"select" | "organize" | "output">("select");
   const [showLog, setShowLog] = useState(false);
-  // Posts fetched and parsed, in the order they'll appear in the digest.
+  // Entries fetched and parsed, in the order they'll appear in the digest. An
+  // agent-processed email contributes one entry per article it linked to.
   const [prepared, setPrepared] = useState<DigestPost[]>([]);
   const [preparing, setPreparing] = useState(false);
+  const [prepareDone, setPrepareDone] = useState(0);
   const [prepareTotal, setPrepareTotal] = useState(0);
+  // Blocks the user has struck out. Marking is not deleting: the entries keep
+  // everything, so stepping back to Organize shows the marks again and they can
+  // be taken back. The removal happens on the way out, at generation.
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
+  const [removing, setRemoving] = useState(false);
+  // Bumped on every click in the running order, so clicking the same row twice
+  // scrolls to it twice.
+  const [focus, setFocus] = useState<{ id: string; n: number } | null>(null);
 
   // Fetched email bodies, cached by message id so re-generating is instant.
   const bodyCache = useRef(new Map<string, string>());
-  // Parsed blocks, likewise — agent runs cost money, so don't repeat one just
-  // because the user stepped back to change the selection.
-  const blocksCache = useRef(new Map<string, Block[]>());
+  // Prepared entries, likewise — agent runs cost money, so don't repeat one
+  // just because the user stepped back to change the selection.
+  const entryCache = useRef(new Map<string, DigestPost[]>());
 
   useEffect(() => {
     gmailStatus()
@@ -165,11 +176,16 @@ export default function App() {
     setOutput(null);
   }, [settings.format]);
 
-  // Agent settings decide how a post is parsed, so cached blocks are stale
+  // Agent settings decide how a post is parsed, so cached entries are stale
   // the moment they change.
   useEffect(() => {
-    blocksCache.current.clear();
+    entryCache.current.clear();
   }, [agentConfigs, anthropicKey]);
+
+  // Striking material out changes what a generated document would contain.
+  useEffect(() => {
+    setOutput(null);
+  }, [removed]);
 
   const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
@@ -286,6 +302,7 @@ export default function App() {
     setError(null);
     setOutput(null);
     setPrepared([]);
+    setPrepareDone(0);
     setPrepareTotal(selected.length);
     setPreparing(true);
     logInfo("render", `Preparing ${selected.length} posts`);
@@ -299,15 +316,42 @@ export default function App() {
           bodyCache.current.set(p.id, body);
           logInfo("gmail", `Fetched "${p.subject}" (${body.length} chars)`);
         }
+        /** The email itself as one entry — the fallback whenever no agent runs. */
+        const asPost = (): DigestPost[] => {
+          const isHtml = /<\/?[a-z][\s\S]*>/i.test(body!.slice(0, 500));
+          const blocks = isHtml ? parseEmailHtml(body!, p.subject) : parsePlainText(body!);
+          return [
+            { id: p.id, publication: p.publication, title: p.subject, dateMs: p.dateMs, blocks },
+          ];
+        };
         const agent = agentConfigs[p.publication];
-        let blocks = blocksCache.current.get(p.id);
-        if (blocks === undefined) {
+        let entries = entryCache.current.get(p.id);
+        if (entries === undefined) {
           if (agent?.useAgent && anthropicKey.trim()) {
             report(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
             try {
-              const md = await anthropicProcess(anthropicKey, agent.instructions, p.subject, body);
-              blocks = markdownToBlocks(md, p.subject);
-              logInfo("agent", `"${p.subject}" → ${blocks.length} blocks from ${md.length} chars`);
+              const found = await anthropicProcess(
+                anthropicKey,
+                agent.instructions,
+                p.subject,
+                body
+              );
+              // Each linked article stands on its own in the digest, under its
+              // own title and byline rather than the email's subject line.
+              entries = found.map((entry, n) => ({
+                id: `${p.id}#${n}`,
+                publication: p.publication,
+                title: entry.title,
+                author: entry.author || undefined,
+                sourceUrl: entry.url,
+                dateMs: p.dateMs,
+                blocks: markdownToBlocks(entry.markdown, entry.title),
+              }));
+              logInfo(
+                "agent",
+                `"${p.subject}" → ${entries.length} article${entries.length === 1 ? "" : "s"}, ` +
+                  `${entries.reduce((n, e) => n + e.blocks.length, 0)} blocks`
+              );
             } catch (e) {
               // Fall back to the default parser rather than failing the whole run.
               const detail = String(e);
@@ -319,23 +363,17 @@ export default function App() {
                 setError(message);
                 logError("agent", message);
               }
-              const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
-              blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
+              entries = asPost();
             }
           } else {
-            const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
-            blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
-            logInfo("parse", `"${p.subject}" → ${blocks.length} blocks`);
+            entries = asPost();
+            logInfo("parse", `"${p.subject}" → ${entries[0].blocks.length} blocks`);
           }
-          blocksCache.current.set(p.id, blocks);
+          entryCache.current.set(p.id, entries);
         }
-        const post: DigestPost = {
-          publication: p.publication,
-          title: p.subject,
-          dateMs: p.dateMs,
-          blocks,
-        };
-        setPrepared((prev) => [...prev, post]);
+        const ready = entries;
+        setPrepared((prev) => [...prev, ...ready]);
+        setPrepareDone(i + 1);
       }
       setProgress("");
       logInfo("render", "All posts prepared");
@@ -358,17 +396,50 @@ export default function App() {
     setOutput(null);
   }, []);
 
+  /** Marks blocks struck out, or takes the marks back when `remove` is false. */
+  const markRemoved = useCallback((keys: string[], remove: boolean) => {
+    if (keys.length === 0) return;
+    setRemoved((prev) => {
+      const next = new Set(prev);
+      for (const key of keys) {
+        if (remove) next.add(key);
+        else next.delete(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const restoreAll = useCallback(() => setRemoved(new Set()), []);
+
+  /** How many of an entry's blocks survive into the output. */
+  const keptBlocks = useCallback(
+    (post: DigestPost) => post.blocks.filter((_, i) => !removed.has(blockKey(post.id, i))).length,
+    [removed]
+  );
+
+  // What Generate will actually lay out: the running order, less anything
+  // struck out, less any entry that leaves nothing behind.
+  const forOutput = useMemo(() => withRemovals(prepared, removed), [prepared, removed]);
+
   const generate = useCallback(async () => {
-    if (prepared.length === 0) return;
+    if (forOutput.length === 0) return;
     setError(null);
     setGenerating(true);
     const startedAt = Date.now();
-    logInfo("render", `Generating ${settings.format.toUpperCase()} from ${prepared.length} posts`);
+    const dropped = prepared.length - forOutput.length;
+    logInfo(
+      "render",
+      `Generating ${settings.format.toUpperCase()} from ${forOutput.length} entries` +
+        (removed.size > 0
+          ? ` (${removed.size} block${removed.size === 1 ? "" : "s"} removed` +
+            (dropped > 0 ? `, ${dropped} entr${dropped === 1 ? "y" : "ies"} emptied)` : ")")
+          : "")
+    );
     try {
       if (settings.format === "epub") {
-        setOutput(await generateEpub(prepared, settings, report));
+        setOutput(await generateEpub(forOutput, settings, report));
       } else {
-        setOutput({ format: "pdf", bytes: await generatePdf(prepared, settings, report) });
+        setOutput({ format: "pdf", bytes: await generatePdf(forOutput, settings, report) });
       }
       setProgress("");
       logInfo("render", `Done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
@@ -377,7 +448,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [prepared, settings, report, fail]);
+  }, [forOutput, prepared.length, removed.size, settings, report, fail]);
 
   const exportOutput = useCallback(async () => {
     if (!output) return;
@@ -481,16 +552,22 @@ export default function App() {
               </button>
               <OrganizePanel
                 posts={prepared}
-                done={prepared.length}
+                done={prepareDone}
                 total={prepareTotal}
                 preparing={preparing}
+                removing={removing}
+                removedCount={removed.size}
+                keptBlocks={keptBlocks}
                 onMove={movePost}
+                onFocus={(id) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }))}
+                onToggleRemoving={() => setRemoving((v) => !v)}
+                onRestoreAll={restoreAll}
               />
             </div>
             <div className="step-actions">
               <button
                 className="primary"
-                disabled={preparing || prepared.length === 0}
+                disabled={preparing || forOutput.length === 0}
                 onClick={() => setStep("output")}
               >
                 {preparing ? "Preparing…" : "Continue to output"}
@@ -508,7 +585,7 @@ export default function App() {
                 disabled={generating}
                 title={generating ? "Finish generating first" : "Back to the running order"}
               >
-                ← {prepared.length} post{prepared.length === 1 ? "" : "s"} in order
+                ← {forOutput.length} entr{forOutput.length === 1 ? "y" : "ies"} in order
               </button>
               <h2 className="col-title">Output</h2>
               <SettingsPanel settings={settings} onChange={setSettings} />
@@ -516,7 +593,7 @@ export default function App() {
             <div className="step-actions">
               <button
                 className="primary generate"
-                disabled={generating || prepared.length === 0}
+                disabled={generating || forOutput.length === 0}
                 onClick={generate}
               >
                 {generating ? "Generating…" : `Generate ${settings.format.toUpperCase()}`}
@@ -535,7 +612,14 @@ export default function App() {
 
       <main className="col col-preview">
         {step === "organize" ? (
-          <ContentPreview posts={prepared} preparing={preparing} />
+          <ContentPreview
+            posts={prepared}
+            preparing={preparing}
+            removing={removing}
+            removed={removed}
+            focus={focus}
+            onMark={markRemoved}
+          />
         ) : (
           <Preview output={output} />
         )}

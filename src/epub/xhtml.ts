@@ -192,6 +192,17 @@ h4, h5, h6 { font-size: 1em; margin: 1em 0 0.3em; }
   text-align: left;
 }
 
+.post-source {
+  font-size: 0.75em;
+  color: #6b6b73;
+  margin: -1em 0 1.2em;
+  text-indent: 0;
+  text-align: left;
+  word-wrap: break-word;
+}
+
+.post-source a { color: inherit; }
+
 blockquote {
   margin: 0.6em 0 0.6em 1.2em;
   font-style: italic;

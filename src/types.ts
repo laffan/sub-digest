@@ -94,12 +94,40 @@ export type Block =
   | { kind: "image"; src: string }
   | { kind: "rule" };
 
-/** A fully fetched + parsed post, ready for layout. */
+/**
+ * One entry in the digest, ready for layout. Usually a post; for an
+ * agent-processed newsletter it's one of the articles that newsletter linked
+ * to, which is why the title and byline can differ from the email's.
+ */
 export interface DigestPost {
+  /** Stable across re-preparations, so removals and ordering survive a revisit. */
+  id: string;
   publication: string;
   title: string;
+  /** Who wrote it, when the newsletter named them. */
+  author?: string;
+  /** The article's own address, for entries the agent fetched. */
+  sourceUrl?: string;
   dateMs: number;
   blocks: Block[];
+}
+
+/** Who to credit: the piece's author when known, else where it arrived from. */
+export function byline(post: DigestPost): string {
+  return post.author?.trim() ? post.author.trim() : post.publication;
+}
+
+/** The key identifying one block of one entry, for marking it removed. */
+export function blockKey(postId: string, index: number): string {
+  return `${postId}#${index}`;
+}
+
+/** Drops blocks marked for removal, and any entry left with nothing in it. */
+export function withRemovals(posts: DigestPost[], removed: ReadonlySet<string>): DigestPost[] {
+  if (removed.size === 0) return posts;
+  return posts
+    .map((p) => ({ ...p, blocks: p.blocks.filter((_, i) => !removed.has(blockKey(p.id, i))) }))
+    .filter((p) => p.blocks.length > 0);
 }
 
 /** An image already decoded and re-encoded as JPEG for embedding. */

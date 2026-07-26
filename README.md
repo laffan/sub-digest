@@ -22,12 +22,15 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    caret by its name) to enable a per-newsletter **AI agent** and give it
    instructions — built for link roundups, where the digest should carry the
    linked articles rather than a page of links. With an Anthropic API key (set
-   in Settings), the model identifies the newsletter's article links and stops
-   there; **the app fetches each one** and builds the entry out of the scraped
-   text. Every word in the digest is scraped, never written, so the agent costs
-   one short model call per newsletter rather than a minute of it retyping the
-   articles. A newsletter with no article links is noted in the log and falls
-   through to the normal parser.
+   in Settings), the model identifies the newsletter's article links — title,
+   author and URL, all lifted from the email's own words — and stops there;
+   **the app fetches each one** and builds an entry out of the scraped text.
+   Each linked article becomes its own entry, under its own title and byline,
+   so a roundup arrives as the pieces it recommended rather than as the email
+   that listed them. Every word in the digest is scraped, never written, so the
+   agent costs one short model call per newsletter rather than a minute of it
+   retyping the articles. A newsletter with no article links is noted in the
+   log and falls through to the normal parser.
 4. **Generate** — pick **PDF** or **EPUB** at the top of the middle column;
    both take the same posts in the order set in **Organize**.
 
@@ -55,10 +58,21 @@ three steps in order, each with a link back:
 
 1. **Select** — the account and the discovered posts.
 2. **Organize** — every selected post is fetched and parsed here, one at a
-   time, with progress at the top of the column and the running order below it;
-   **↑ ↓** on any row sets where it lands in the digest (it starts
-   chronological). The content accrues on the right as each post is read, so
-   you can see what was actually captured before generating anything.
+   time, with progress at the top of the column and the running order below it.
+   Each row is one entry in the digest — for agent-processed newsletters, one
+   of the articles it linked to, listed under that article's title, byline and
+   address. **↑ ↓** sets where a row lands in the digest (it starts
+   chronological), and **clicking** one scrolls the preview to it. The content
+   accrues on the right as each post is read, so you can see what was actually
+   captured before generating anything.
+
+   **Remove content** turns the pointer into a crosshair: drag across the
+   preview and the material you cover is marked in red — it's still there, and
+   still yours to adjust, but it won't reach the output. Hold **⌥** while
+   dragging to put material back, or **Restore** to clear every mark at once.
+   An entry struck out entirely drops from the digest, and its row says so.
+   Nothing is deleted, so stepping back here from Output finds every mark
+   where you left it.
 3. **Output** — format and its settings, then Generate.
 
 A selection can't change under a run that's already going. The preview on the
@@ -218,7 +232,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
-| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for link-roundup newsletters; returns Markdown. **Exactly one model call**, and its only job is naming the links — **structured outputs** (`output_config.format` with a JSON schema) give back title, URL and the newsletter's note. Everything after that is code: the app resolves each link, scrapes the article, and assembles the entry. Nothing in the digest is generated, so the model can't invent text and isn't spending a minute a newsletter retyping what the scraper already has. Every URL it returns is checked against the email character for character, and one that isn't there is logged as a warning. API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s for the model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
+| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for link-roundup newsletters; returns one entry per linked article. **Exactly one model call**, and its only job is naming the links — **structured outputs** (`output_config.format` with a JSON schema) give back title, author, URL and the newsletter's note, all quoted from the email rather than composed. Everything after that is code: the app resolves each link, scrapes the article, and assembles the entry. Nothing in the digest is generated, so the model can't invent text and isn't spending a minute a newsletter retyping what the scraper already has. Every URL it returns is checked against the email character for character, and one that isn't there is logged as a warning. API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s for the model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |
 | Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists kept as lists, quotes as quotes — with nested matches emitted once. `script`, `style` and `nav` never match, so their text can't reach the digest |
 | PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib |
@@ -226,6 +240,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
+| Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark). Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
 | Log | `src/log.ts`, `src-tauri/src/log.rs` | Module-level store in the UI (any layer can write without prop drilling); the backend feeds it over a Tauri `log` event |
 | API transport | `src-tauri/src/anthropic.rs` | Responses are streamed (SSE), on a fresh HTTP/1.1 connection per request with no pooling — a silent request is what an idle-connection timeout kills, and a pooled or multiplexed connection carries that failure to the next call. First-token timing is logged, so a slow call can be told apart from a stalled one |
 

@@ -69,9 +69,13 @@ sponsor/advertisement links, the publication's own archive or homepage, and \
 anything pointing at an email address.\n\
 - Copy each URL exactly as it appears in the email, character for character. Do \
 not clean, shorten, unwrap, or resolve it — that is handled downstream.\n\
-- Take the title and the note verbatim from the newsletter's own words. Never \
-write a description of your own; if the newsletter gives none, leave the note \
-empty.\n\
+- Take the title, the author and the note verbatim from the newsletter's own \
+words. Never write a description of your own; if the newsletter gives none, \
+leave the note empty.\n\
+- The author is whoever wrote the linked piece — not the newsletter, not the \
+publication it appeared in. Newsletters name them in bylines like 'by Jane Doe' \
+or 'Jane Doe | The Atlantic'. Leave it empty when the newsletter doesn't say; \
+never guess a name from your own knowledge of the publication or the URL.\n\
 - List each distinct article once, in the order the newsletter presents them.\n\
 - If the newsletter recommends no articles, return an empty list. Do not invent \
 links to fill it.\n\n\
@@ -95,6 +99,10 @@ fn link_schema() -> Value {
                             "type": "string",
                             "description": "The item's title, in the newsletter's own words."
                         },
+                        "author": {
+                            "type": "string",
+                            "description": "Who wrote the linked piece, as the newsletter names them, or an empty string if it doesn't."
+                        },
                         "url": {
                             "type": "string",
                             "description": "The link's destination exactly as written in the email."
@@ -104,7 +112,7 @@ fn link_schema() -> Value {
                             "description": "The newsletter's own description of the item, or an empty string."
                         }
                     },
-                    "required": ["title", "url", "note"],
+                    "required": ["title", "author", "url", "note"],
                     "additionalProperties": false
                 }
             },
@@ -122,8 +130,23 @@ fn link_schema() -> Value {
 #[derive(Debug, Clone)]
 struct LinkItem {
     title: String,
+    author: String,
     url: String,
     note: String,
+}
+
+/// One finished digest entry, handed to the UI. Each linked article becomes its
+/// own entry rather than being folded into the email that recommended it: the
+/// article is what the reader wanted, so it's the article that should carry a
+/// title and a byline through the running order and the table of contents.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentEntry {
+    title: String,
+    /// The newsletter's byline for the piece; empty when it gave none.
+    author: String,
+    /// The article's own address, after the redirect wrapper was resolved.
+    url: String,
+    markdown: String,
 }
 
 /// One scraped page: the URL the text actually came from — after the redirect
@@ -389,8 +412,7 @@ pub async fn anthropic_test(app: AppHandle, api_key: String) -> Result<String, S
     Ok("Connected (Claude Haiku 4.5)".to_string())
 }
 
-/// Transforms one newsletter's raw body into Markdown, running the agent's
-/// `fetch_page` tool loop as needed.
+/// Turns one newsletter into digest entries — one per article it recommends.
 #[tauri::command]
 pub async fn anthropic_process(
     app: AppHandle,
@@ -398,7 +420,7 @@ pub async fn anthropic_process(
     instructions: String,
     subject: String,
     content: String,
-) -> Result<String, String> {
+) -> Result<Vec<AgentEntry>, String> {
     // A stalled run is indistinguishable from a hung app, so cap the whole
     // thing; the caller falls back to the default parser on failure.
     match tokio::time::timeout(
@@ -427,7 +449,7 @@ async fn run_agent(
     instructions: String,
     subject: String,
     content: String,
-) -> Result<String, String> {
+) -> Result<Vec<AgentEntry>, String> {
     let started = Instant::now();
     let trimmed: String = content.chars().take(MAX_CONTENT_CHARS).collect();
     let instr = instructions.trim();
@@ -462,10 +484,19 @@ async fn run_agent(
     }
     log::info(app, "agent", format!("{} link(s) identified:", links.len()));
     for (i, link) in links.iter().enumerate() {
+        let byline = match link.author.trim() {
+            "" => String::new(),
+            a => format!(" by {a}"),
+        };
         log::info(
             app,
             "agent",
-            format!("  {}. {} — {}", i + 1, log::ellipsize(&link.title, 70), link.url),
+            format!(
+                "  {}. {}{byline} — {}",
+                i + 1,
+                log::ellipsize(&link.title, 70),
+                link.url
+            ),
         );
     }
     // The link pass is only allowed to *copy* URLs out of the email, so check
@@ -535,24 +566,38 @@ async fn run_agent(
         ),
     );
 
-    // The entry is built here, in code, out of what the scraper returned. The
-    // model is not asked to write it: the article text already exists, and
-    // having it retyped a token at a time was the whole of the old runtime.
+    // A link that couldn't be fetched has no article to become, so say which
+    // ones dropped out rather than letting the count quietly disagree.
+    for (link, article) in articles.iter() {
+        if let Err(e) = article {
+            log::warn(
+                app,
+                "agent",
+                format!("dropped \"{}\" — {e}", log::ellipsize(&link.title, 70)),
+            );
+        }
+    }
     if fetched == 0 {
         return Err(format!(
             "none of the {} linked page(s) could be scraped",
             articles.len()
         ));
     }
+
+    // The entries are built here, in code, out of what the scraper returned.
+    // The model is not asked to write them: the article text already exists,
+    // and having it retyped a token at a time was the whole of the old runtime.
     let assemble_started = Instant::now();
-    let markdown = assemble(&articles);
+    let entries = entries(articles);
     let assemble_secs = assemble_started.elapsed().as_secs_f32();
+    let chars: usize = entries.iter().map(|e| e.markdown.chars().count()).sum();
     log::info(
         app,
         "agent",
         format!(
-            "Assembled the entry in code from {fetched} scraped page(s) — {} chars of Markdown, no model call",
-            markdown.chars().count()
+            "Built {} entr{} in code from {fetched} scraped page(s) — {chars} chars of Markdown, no model call",
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" },
         ),
     );
 
@@ -562,16 +607,16 @@ async fn run_agent(
         app,
         "agent",
         format!(
-            "Finished \"{}\" in {total:.1}s: {} chars of Markdown — \
+            "Finished \"{}\" in {total:.1}s: {} article(s), {chars} chars of Markdown — \
              find links {links_secs:.1}s ({:.0}%) · scrape {fetch_secs:.1}s ({:.0}%) · assemble {assemble_secs:.1}s ({:.0}%)",
             subject.trim(),
-            markdown.chars().count(),
+            entries.len(),
             pct(links_secs),
             pct(fetch_secs),
             pct(assemble_secs),
         ),
     );
-    Ok(markdown)
+    Ok(entries)
 }
 
 /// Pass 1: the model reads the email and names the links, in a fixed JSON shape
@@ -617,40 +662,34 @@ fn quoted_verbatim(email: &str, url: &str) -> bool {
     email.contains(url) || email.replace("&amp;", "&").contains(url)
 }
 
-/// Builds the digest entry: one section per link, each headed by the title the
-/// newsletter gave it, followed by the article as the scraper read it.
+/// Turns the scraped pages into digest entries — one per article, carrying the
+/// newsletter's own title, byline and note, and the page as the scraper read
+/// it. Everything here is copied, never composed; which is all the model was
+/// ever doing too, only one token at a time.
 ///
-/// Everything here is copied, never composed — which is what the model was
-/// being asked to do too, only one token at a time.
-fn assemble(articles: &[(LinkItem, Result<Article, String>)]) -> String {
-    let mut out = String::new();
-    for (link, article) in articles {
-        if !out.is_empty() {
-            out.push_str("\n---\n\n");
-        }
-        let title = match link.title.trim() {
-            "" => link.url.as_str(),
-            t => t,
-        };
-        out.push_str(&format!("## {title}\n\n"));
-        // The source the text actually came from — the resolved article, not
-        // the newsletter's redirect wrapper.
-        match article {
-            Ok(a) => out.push_str(&format!("{}\n\n", a.url)),
-            Err(_) => out.push_str(&format!("{}\n\n", link.url)),
-        }
-        if !link.note.trim().is_empty() {
-            out.push_str(&format!("> {}\n\n", normalize(&link.note)));
-        }
-        match article {
-            Ok(a) => {
-                out.push_str(a.markdown.trim());
-                out.push('\n');
+/// A link that couldn't be fetched is left out rather than becoming an entry
+/// with a title and nothing under it. The fetch failure is already in the log.
+fn entries(articles: Vec<(LinkItem, Result<Article, String>)>) -> Vec<AgentEntry> {
+    articles
+        .into_iter()
+        .filter_map(|(link, article)| {
+            let article = article.ok()?;
+            let mut markdown = String::new();
+            if !link.note.trim().is_empty() {
+                markdown.push_str(&format!("> {}\n\n", normalize(&link.note)));
             }
-            Err(e) => out.push_str(&format!("(content unavailable — {e})\n")),
-        }
-    }
-    out
+            markdown.push_str(article.markdown.trim());
+            Some(AgentEntry {
+                title: match link.title.trim() {
+                    "" => article.url.clone(),
+                    t => t.to_string(),
+                },
+                author: link.author.trim().to_string(),
+                url: article.url,
+                markdown,
+            })
+        })
+        .collect()
 }
 
 /// Reads the link pass's JSON back into link items. The schema guarantees the
@@ -670,6 +709,7 @@ fn parse_link_response(text: &str) -> Result<(Vec<LinkItem>, Option<String>), St
             }
             Some(LinkItem {
                 title: item["title"].as_str().unwrap_or("").trim().to_string(),
+                author: item["author"].as_str().unwrap_or("").trim().to_string(),
                 url,
                 note: item["note"].as_str().unwrap_or("").trim().to_string(),
             })
@@ -989,15 +1029,16 @@ mod tests {
         assert_eq!(extract(page, Some(".lede")).unwrap(), "Just the one line.");
     }
 
-    /// One section per link, headed by the newsletter's own title, carrying the
-    /// resolved URL rather than the redirect wrapper — and a failed fetch says
-    /// so rather than being dropped or filled in.
+    /// One entry per article, carrying the newsletter's title, byline and note,
+    /// and the resolved URL rather than the redirect wrapper. A link that
+    /// couldn't be fetched becomes no entry at all.
     #[test]
-    fn assembles_an_entry_from_the_scrape() {
+    fn builds_one_entry_per_scraped_article() {
         let articles = vec![
             (
                 LinkItem {
                     title: "The Greatness Of David Lean".into(),
+                    author: "Alexander Larman".into(),
                     url: "https://thebrowser.com/r/abc?m=1".into(),
                     note: "On Lawrence.".into(),
                 },
@@ -1009,6 +1050,7 @@ mod tests {
             (
                 LinkItem {
                     title: "Rain Robbers".into(),
+                    author: String::new(),
                     url: "https://thebrowser.com/r/def?m=1".into(),
                     note: String::new(),
                 },
@@ -1016,18 +1058,38 @@ mod tests {
             ),
         ];
 
-        let out = assemble(&articles);
+        let out = entries(articles);
+        assert_eq!(out.len(), 1, "the 403 should not become an empty entry");
+        assert_eq!(out[0].title, "The Greatness Of David Lean");
+        assert_eq!(out[0].author, "Alexander Larman");
+        assert_eq!(out[0].url, "https://example.com/lean");
         assert_eq!(
-            out,
-            "## The Greatness Of David Lean\n\n\
-             https://example.com/lean\n\n\
-             > On Lawrence.\n\n\
-             ### Lean\n\nHe made big films.\n\
-             \n---\n\n\
-             ## Rain Robbers\n\n\
-             https://thebrowser.com/r/def?m=1\n\n\
-             (content unavailable — fetch failed: HTTP 403 Forbidden)\n"
+            out[0].markdown,
+            "> On Lawrence.\n\n### Lean\n\nHe made big films."
         );
+    }
+
+    /// The newsletter is the only source for a byline, so a missing one stays
+    /// missing — the UI decides what to show in its place.
+    #[test]
+    fn an_entry_without_a_byline_keeps_it_empty() {
+        let out = entries(vec![(
+            LinkItem {
+                title: String::new(),
+                author: String::new(),
+                url: "https://thebrowser.com/r/abc".into(),
+                note: String::new(),
+            },
+            Ok(Article {
+                url: "https://example.com/piece".into(),
+                markdown: "Words.".into(),
+            }),
+        )]);
+        assert_eq!(out[0].author, "");
+        // No title from the newsletter either — fall back to the address rather
+        // than heading the entry with nothing.
+        assert_eq!(out[0].title, "https://example.com/piece");
+        assert_eq!(out[0].markdown, "Words.");
     }
 
     /// The newsletter case this pipeline exists for: a redirect wrapper lands
@@ -1055,16 +1117,18 @@ mod tests {
     fn reads_back_the_structured_link_list() {
         let (items, selector) = parse_link_response(
             r#"{"items":[
-                 {"title":"The Greatness of David Lean","url":"https://thebrowser.com/r/abc?m=1","note":"On Lawrence."},
-                 {"title":"No link here","url":"","note":""},
-                 {"title":" Padded ","url":" https://example.com/x ","note":" "}
+                 {"title":"The Greatness of David Lean","author":"Alexander Larman","url":"https://thebrowser.com/r/abc?m=1","note":"On Lawrence."},
+                 {"title":"No link here","author":"","url":"","note":""},
+                 {"title":" Padded ","author":" Jane Doe ","url":" https://example.com/x ","note":" "}
                ],"selector":"article"}"#,
         )
         .unwrap();
 
         assert_eq!(items.len(), 2, "entries without a URL should be dropped");
         assert_eq!(items[0].url, "https://thebrowser.com/r/abc?m=1");
+        assert_eq!(items[0].author, "Alexander Larman");
         assert_eq!(items[1].title, "Padded");
+        assert_eq!(items[1].author, "Jane Doe");
         assert_eq!(items[1].url, "https://example.com/x");
         assert_eq!(items[1].note, "");
         assert_eq!(selector.as_deref(), Some("article"));

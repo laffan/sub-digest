@@ -11,7 +11,14 @@ import {
   rgb,
   type RGB,
 } from "pdf-lib";
-import type { Block, DigestPost, LayoutSettings, PageSizeName, PreparedImage } from "../types";
+import {
+  byline,
+  type Block,
+  type DigestPost,
+  type LayoutSettings,
+  type PageSizeName,
+  type PreparedImage,
+} from "../types";
 import { prepareImage } from "../images";
 import { dateRangeLabel, formatLongDate } from "../dates";
 
@@ -66,7 +73,7 @@ export async function generatePdf(
     const post = sorted[i];
     onProgress(`Laying out ${i + 1}/${sorted.length}: ${post.title}`);
     const page = await layoutPost(flow, post, settings);
-    toc.push({ publication: post.publication, title: post.title, dateMs: post.dateMs, page });
+    toc.push({ byline: byline(post), title: post.title, dateMs: post.dateMs, page });
   }
 
   flow.drawFooters(sorted);
@@ -444,13 +451,17 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
 
   // Keep the header together. This has to measure the real wrapped height, not
   // guess: if the title spilled into the next column the page recorded below
-  // would be the one holding a stranded publication line, and the table of
-  // contents would send readers a page early.
+  // would be the one holding a stranded byline, and the table of contents would
+  // send readers a page early.
   const pubSize = body * 0.78;
   const titleSize = body * 1.55;
-  const pub = sanitize(post.publication.toUpperCase());
-  const pubLines = wrapText(pub, flow.fonts.bold, pubSize, flow.colW);
+  const sourceSize = body * 0.7;
+  const credit = sanitize(byline(post).toUpperCase());
+  const pubLines = wrapText(credit, flow.fonts.bold, pubSize, flow.colW);
   const titleLines = wrapText(sanitize(post.title), flow.fonts.bold, titleSize, flow.colW);
+  const sourceLines = post.sourceUrl
+    ? wrapText(sanitize(post.sourceUrl), flow.fonts.regular, sourceSize, flow.colW).length
+    : 0;
   const headerHeight =
     body * 2.6 + // separator rule and the space around it
     Math.max(pubLines.length, 1) * pubSize * 1.15 +
@@ -458,6 +469,7 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
     Math.max(titleLines.length, 1) * titleSize * 1.12 +
     body * 0.35 +
     body * 0.82 * 1.15 + // date
+    sourceLines * sourceSize * 1.15 +
     body * 0.9 +
     body * s.lineHeight * 2; // and enough body text that the header isn't stranded
   flow.fit(headerHeight);
@@ -475,26 +487,38 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
     flow.advance(body * 1.2);
   }
 
-  drawParagraph(flow, post.publication.toUpperCase(), {
+  drawParagraph(flow, byline(post).toUpperCase(), {
     font: flow.fonts.bold,
-    size: body * 0.78,
+    size: pubSize,
     color: MUTED,
     spaceAfter: body * 0.35,
     lineHeight: 1.15,
   });
   drawParagraph(flow, post.title, {
     font: flow.fonts.bold,
-    size: body * 1.55,
+    size: titleSize,
     spaceAfter: body * 0.35,
     lineHeight: 1.12,
   });
   drawParagraph(flow, formatLongDate(post.dateMs), {
     font: flow.fonts.italic,
     size: body * 0.82,
+    // The source line follows, so close the gap between the two.
+    spaceAfter: post.sourceUrl ? body * 0.12 : body * 0.9,
     color: MUTED,
-    spaceAfter: body * 0.9,
     lineHeight: 1.15,
   });
+  // Where the text came from. In print a link isn't clickable, but it's the
+  // only way back to the piece itself.
+  if (post.sourceUrl) {
+    drawParagraph(flow, post.sourceUrl, {
+      font: flow.fonts.regular,
+      size: sourceSize,
+      color: MUTED,
+      spaceAfter: body * 0.9,
+      lineHeight: 1.15,
+    });
+  }
 
   for (const block of post.blocks) {
     await layoutBlock(flow, block, s);
@@ -593,7 +617,8 @@ async function layoutBlock(flow: Flow, block: Block, s: LayoutSettings) {
 // Front matter: masthead + table of contents
 
 interface TocEntry {
-  publication: string;
+  /** The piece's author when the newsletter named one, else the publication. */
+  byline: string;
   title: string;
   dateMs: number;
   page: number;
@@ -714,7 +739,7 @@ function drawFrontMatter(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: D
     }
 
     y -= metaSize * 1.5;
-    const meta = `${entry.publication}  ·  ${new Date(entry.dateMs).toLocaleDateString(undefined, {
+    const meta = `${entry.byline}  ·  ${new Date(entry.dateMs).toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
     })}`;

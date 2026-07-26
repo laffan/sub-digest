@@ -6,6 +6,12 @@
   --muted: #7a766d;
   --accent: #d05e2f;
   --accent-dark: #b34e24;
+  /* Material marked for removal, and the ⌥ drag that puts it back. */
+  --strike-bg: rgba(198, 58, 52, 0.1);
+  --strike-edge: rgba(198, 58, 52, 0.45);
+  --strike-ink: #9d2f2b;
+  --restore-bg: rgba(70, 110, 190, 0.1);
+  --restore-edge: rgba(70, 110, 190, 0.5);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--ink);
 }
@@ -842,12 +848,56 @@ label.check {
   padding: 0;
 }
 
+.organize-tools {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tool-btn {
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: 4px;
+  color: var(--muted);
+}
+
+.tool-btn:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.tool-btn.active {
+  color: var(--strike-ink);
+  border-color: var(--strike-edge);
+  background: var(--strike-bg);
+}
+
 .toc-row {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   padding: 7px 0;
   border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.toc-row:hover {
+  background: var(--bg);
+}
+
+/* Everything in this entry is struck out, so nothing of it reaches the output. */
+.toc-row.emptied .toc-text {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.toc-url {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toc-num {
@@ -906,6 +956,54 @@ label.check {
 .content-preview {
   max-width: 42em;
   margin: 0 auto;
+}
+
+/* Strike-out tool armed: the pointer becomes a target and drags mark material
+   rather than selecting text. */
+.content-preview.removing {
+  cursor: crosshair;
+  user-select: none;
+}
+
+/* Padded out and pulled back by the same amount, so a marked block reads as a
+   band of colour without the text shifting when it's marked. */
+.cp-block {
+  padding: 2px 7px;
+  margin: 0 -7px;
+  border-radius: 3px;
+  transition: background 0.12s ease;
+}
+
+/* Marked for removal — still here, still editable, just not going to print. */
+.cp-block.struck {
+  background: var(--strike-bg);
+  box-shadow: inset 0 0 0 1px var(--strike-edge);
+}
+
+.cp-block.struck > * {
+  opacity: 0.72;
+}
+
+/* The rubber band, in viewport coordinates over everything else. */
+.cp-band {
+  position: fixed;
+  pointer-events: none;
+  border: 1px solid var(--strike-edge);
+  background: var(--strike-bg);
+  border-radius: 2px;
+  z-index: 30;
+}
+
+.cp-band.restoring {
+  border-color: var(--restore-edge);
+  background: var(--restore-bg);
+}
+
+.cp-source {
+  font-size: 11px;
+  color: var(--muted);
+  margin: -10px 0 14px;
+  word-break: break-all;
 }
 
 .cp-post {

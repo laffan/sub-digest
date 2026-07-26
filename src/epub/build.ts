@@ -1,7 +1,7 @@
 import { strToU8, zipSync, type Zippable } from "fflate";
 import { dateRangeLabel, formatLongDate, formatShortDate, isoDay } from "../dates";
 import { prepareImage } from "../images";
-import type { DigestPost, GeneratedOutput, LayoutSettings } from "../types";
+import { byline, type DigestPost, type GeneratedOutput, type LayoutSettings } from "../types";
 import { blocksToXhtml, epubCss, esc, xhtmlDocument, type ImageResolver } from "./xhtml";
 
 /**
@@ -34,6 +34,9 @@ export async function generateEpub(
   const range = dateRangeLabel(sorted);
   const title = range ? `Substack Digest, ${range}` : "Substack Digest";
   const publications = [...new Set(sorted.map((p) => p.publication))];
+  // The book's authors are the people who wrote the pieces, where the
+  // newsletter named them — not the newsletters that forwarded them on.
+  const creators = [...new Set(sorted.map(byline))];
 
   const images: Map<string, EpubImage> = settings.includeImages
     ? await collectImages(sorted, onProgress)
@@ -94,7 +97,7 @@ export async function generateEpub(
   );
   files[`${OPS}/toc.ncx`] = strToU8(ncx(bookId, title, chapters, !!coverHtml));
   files[`${OPS}/package.opf`] = strToU8(
-    packageOpf({ bookId, title, publications, posts: sorted, manifest, spine })
+    packageOpf({ bookId, title, creators, posts: sorted, manifest, spine })
   );
 
   return {
@@ -151,9 +154,13 @@ interface Chapter {
 function chapterBody(post: DigestPost, id: string, resolveImage: ImageResolver): string {
   return [
     `<section class="post" epub:type="chapter" id="${id}">`,
-    `<p class="publication">${esc(post.publication)}</p>`,
+    `<p class="publication">${esc(byline(post))}</p>`,
     `<h1 class="post-title">${esc(post.title)}</h1>`,
     `<p class="post-date">${esc(formatLongDate(post.dateMs))}</p>`,
+    // Where the text came from. A reader can follow this one, unlike in print.
+    post.sourceUrl
+      ? `<p class="post-source"><a href="${esc(post.sourceUrl)}">${esc(post.sourceUrl)}</a></p>`
+      : "",
     blocksToXhtml(post.blocks, resolveImage),
     `</section>`,
   ].join("\n");
@@ -191,7 +198,7 @@ function tocList(chapters: Chapter[], hrefFor: (ch: Chapter) => string | null): 
       return (
         `    <li>${open}<span class="toc-title">${esc(ch.title)}</span>` +
         `<span class="toc-meta">${esc(
-          `${ch.post.publication}  ·  ${formatShortDate(ch.post.dateMs)}`
+          `${byline(ch.post)}  ·  ${formatShortDate(ch.post.dateMs)}`
         )}</span>${close}</li>`
       );
     })
@@ -237,15 +244,16 @@ function containerXml(): string {
 interface OpfInput {
   bookId: string;
   title: string;
-  publications: string[];
+  /** Who to credit as the book's authors. */
+  creators: string[];
   posts: DigestPost[];
   manifest: string[];
   spine: string[];
 }
 
-function packageOpf({ bookId, title, publications, posts, manifest, spine }: OpfInput): string {
-  const creators = publications
-    .map((p, i) => `    <dc:creator id="creator${i + 1}">${esc(p)}</dc:creator>`)
+function packageOpf({ bookId, title, creators, posts, manifest, spine }: OpfInput): string {
+  const credits = creators
+    .map((c, i) => `    <dc:creator id="creator${i + 1}">${esc(c)}</dc:creator>`)
     .join("\n");
   const newest = posts.length > 0 ? Math.max(...posts.map((p) => p.dateMs)) : Date.now();
   return `<?xml version="1.0" encoding="utf-8"?>
@@ -254,7 +262,7 @@ function packageOpf({ bookId, title, publications, posts, manifest, spine }: Opf
     <dc:identifier id="pub-id">${esc(bookId)}</dc:identifier>
     <dc:title>${esc(title)}</dc:title>
     <dc:language>en</dc:language>
-${creators}
+${credits}
     <dc:date>${isoDay(newest)}</dc:date>
     <dc:publisher>Sub Digest</dc:publisher>
     <meta property="dcterms:modified">${timestamp()}</meta>
