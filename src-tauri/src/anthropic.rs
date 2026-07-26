@@ -234,6 +234,18 @@ struct StreamedMessage {
     input_tokens: u64,
     output_tokens: u64,
     first_token_secs: f32,
+    total_secs: f32,
+}
+
+impl StreamedMessage {
+    /// Tokens emitted per second of *generation* — the wait after the first
+    /// token, which is the part that scales with how much the model writes.
+    /// Time-to-first-token is queueing and prompt processing, and is reported
+    /// separately; lumping them together hides which one a slow call was.
+    fn tokens_per_sec(&self) -> f32 {
+        let generating = (self.total_secs - self.first_token_secs).max(0.01);
+        self.output_tokens as f32 / generating
+    }
 }
 
 /// Folds one SSE payload into the message being assembled. Anything not
@@ -302,7 +314,7 @@ async fn read_stream(resp: reqwest::Response, started: Instant) -> Result<Stream
     Ok(msg)
 }
 
-async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<Value, String> {
+async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<StreamedMessage, String> {
     if api_key.trim().is_empty() {
         return Err("no Anthropic API key set".to_string());
     }
@@ -359,39 +371,25 @@ async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<Value, Stri
                     let text = resp.text().await.unwrap_or_default();
                     return Err(error_message(status, &text));
                 }
-                let msg = read_stream(resp, started).await?;
+                let mut msg = read_stream(resp, started).await?;
+                msg.total_secs = started.elapsed().as_secs_f32();
                 log::info(
                     app,
                     "agent",
                     format!(
-                        "API replied in {:.1}s, first token at {:.1}s ({} in / {} out tokens, stop: {})",
-                        started.elapsed().as_secs_f32(),
+                        "API replied in {:.1}s, first token at {:.1}s ({} in / {} out tokens, {:.0} tok/s, stop: {})",
+                        msg.total_secs,
                         msg.first_token_secs,
                         msg.input_tokens,
                         msg.output_tokens,
+                        msg.tokens_per_sec(),
                         msg.stop_reason
                     ),
                 );
-                return Ok(json!({
-                    "content": [{ "type": "text", "text": msg.text }],
-                    "stop_reason": msg.stop_reason,
-                    "usage": { "input_tokens": msg.input_tokens, "output_tokens": msg.output_tokens },
-                }));
+                return Ok(msg);
             }
         }
     }
-}
-
-/// Concatenates the text blocks of a Messages API response.
-fn extract_text(resp: &Value) -> String {
-    resp["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|b| b["type"] == "text")
-        .filter_map(|b| b["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 /// Validates an API key with a tiny request; returns a status string.
@@ -472,7 +470,9 @@ async fn run_agent(
     );
 
     // Pass 1 — the model's only job is naming the links.
+    let links_started = Instant::now();
     let (links, selector) = extract_links(app, &api_key, &user).await?;
+    let links_secs = links_started.elapsed().as_secs_f32();
     if links.is_empty() {
         return Err("no article links found in this email".to_string());
     }
@@ -484,11 +484,46 @@ async fn run_agent(
             format!("  {}. {} — {}", i + 1, log::ellipsize(&link.title, 70), link.url),
         );
     }
+    // The link pass is only allowed to *copy* URLs out of the email, so check
+    // that it did: a URL that isn't in the email character for character is one
+    // the model composed, and nothing downstream would otherwise notice.
+    let copied = links.iter().filter(|l| quoted_verbatim(&user, &l.url)).count();
+    if copied == links.len() {
+        log::info(
+            app,
+            "agent",
+            format!(
+                "All {} URL(s) appear verbatim in the email — the model located links, it did not compose them",
+                links.len()
+            ),
+        );
+    } else {
+        log::warn(
+            app,
+            "agent",
+            format!(
+                "only {copied}/{} URL(s) appear verbatim in the email — the rest were rewritten or invented by the model",
+                links.len()
+            ),
+        );
+        for link in links.iter().filter(|l| !quoted_verbatim(&user, &l.url)) {
+            log::warn(app, "agent", format!("  not in the email: {}", link.url));
+        }
+    }
     if let Some(sel) = &selector {
         log::info(app, "agent", format!("Using selector from instructions: {sel}"));
     }
 
     // Pass 2 — we do the fetching, so the URL we retrieve is one we can see.
+    let fetch_started = Instant::now();
+    log::info(
+        app,
+        "agent",
+        format!(
+            "Scraping {} page(s), {MAX_CONCURRENT_FETCHES} at a time — no model call in this phase",
+            links.len()
+        ),
+    );
     let sel = selector.as_deref();
     let articles: Vec<(LinkItem, Result<String, String>)> =
         futures::stream::iter(links.into_iter().map(|link| async move {
@@ -498,12 +533,21 @@ async fn run_agent(
         .buffered(MAX_CONCURRENT_FETCHES)
         .collect()
         .await;
+    let fetch_secs = fetch_started.elapsed().as_secs_f32();
 
     let fetched = articles.iter().filter(|(_, r)| r.is_ok()).count();
+    let scraped: usize = articles
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .map(|t| t.chars().count())
+        .sum();
     log::info(
         app,
         "agent",
-        format!("{fetched}/{} page(s) fetched", articles.len()),
+        format!(
+            "{fetched}/{} page(s) fetched — {scraped} chars scraped by the scraper in {fetch_secs:.1}s",
+            articles.len()
+        ),
     );
 
     // Pass 3 — assemble the Markdown from the email plus what was fetched.
@@ -519,34 +563,70 @@ async fn run_agent(
         }
     }
 
+    let prompt = format!("{user}\n\n{dossier}");
     let body = json!({
         "model": MODEL,
         "max_tokens": 8000,
         "temperature": 0, // deterministic, faithful capture — no creative drift
         "system": SYSTEM_PROMPT,
-        "messages": [{ "role": "user", "content": format!("{user}\n\n{dossier}") }],
+        "messages": [{ "role": "user", "content": &prompt }],
     });
-    log::info(app, "agent", "Assembling the digest entry");
-    let resp = call(app, &api_key, body).await?;
-    if resp["stop_reason"].as_str() == Some("refusal") {
-        return Err("the model declined to process this newsletter".to_string());
-    }
-
-    let markdown = extract_text(&resp);
-    if markdown.trim().is_empty() {
-        return Err(format!(
-            "the agent returned no content (stop reason: {})",
-            resp["stop_reason"].as_str().unwrap_or("?")
-        ));
-    }
     log::info(
         app,
         "agent",
         format!(
-            "Finished \"{}\" in {:.1}s: {} chars of Markdown",
+            "Assembling the digest entry from {scraped} chars of scraped text + {} chars of email",
+            trimmed.chars().count()
+        ),
+    );
+    let assemble_started = Instant::now();
+    let mut msg = call(app, &api_key, body).await?;
+    let assemble_secs = assemble_started.elapsed().as_secs_f32();
+    if msg.stop_reason == "refusal" {
+        return Err("the model declined to process this newsletter".to_string());
+    }
+
+    let markdown = std::mem::take(&mut msg.text);
+    if markdown.trim().is_empty() {
+        return Err(format!(
+            "the agent returned no content (stop reason: {})",
+            if msg.stop_reason.is_empty() { "?" } else { &msg.stop_reason }
+        ));
+    }
+
+    // Where the assembled entry actually came from. The prompt forbids invention,
+    // so a high share is the system working — but it also means the model is
+    // retyping the scrape one token at a time, which is what the generation
+    // seconds below are being spent on.
+    if let Some(share) = verbatim_share(&markdown, &prompt) {
+        log::info(
+            app,
+            "agent",
+            format!(
+                "Assembled entry is {:.0}% verbatim from the material it was given ({} chars out of {} chars in), \
+                 written at {:.0} tok/s over {:.1}s of generation",
+                share * 100.0,
+                markdown.chars().count(),
+                prompt.chars().count(),
+                msg.tokens_per_sec(),
+                (assemble_secs - msg.first_token_secs).max(0.0),
+            ),
+        );
+    }
+
+    let total = started.elapsed().as_secs_f32();
+    let pct = |secs: f32| if total > 0.0 { secs / total * 100.0 } else { 0.0 };
+    log::info(
+        app,
+        "agent",
+        format!(
+            "Finished \"{}\" in {total:.1}s: {} chars of Markdown — \
+             find links {links_secs:.1}s ({:.0}%) · scrape {fetch_secs:.1}s ({:.0}%) · assemble {assemble_secs:.1}s ({:.0}%)",
             subject.trim(),
-            started.elapsed().as_secs_f32(),
-            markdown.chars().count()
+            markdown.chars().count(),
+            pct(links_secs),
+            pct(fetch_secs),
+            pct(assemble_secs),
         ),
     );
     Ok(markdown)
@@ -568,12 +648,70 @@ async fn extract_links(
         "messages": [{ "role": "user", "content": user }],
     });
     log::info(app, "agent", "Identifying the newsletter's links");
-    let resp = call(app, api_key, body).await?;
-    if resp["stop_reason"].as_str() == Some("refusal") {
+    let msg = call(app, api_key, body).await?;
+    if msg.stop_reason == "refusal" {
         return Err("the model declined to read this newsletter".to_string());
     }
+    // What this pass was given and what it produced, in full: the email and
+    // nothing else in, a JSON link list and nothing else out. No page text has
+    // been fetched at this point, so none of it can be in the prompt.
+    log::info(
+        app,
+        "agent",
+        format!(
+            "Link pass read {} chars of email and wrote {} chars of JSON ({} output tokens) — no page text involved",
+            user.chars().count(),
+            msg.text.chars().count(),
+            msg.output_tokens,
+        ),
+    );
 
-    parse_link_response(&extract_text(&resp))
+    parse_link_response(&msg.text)
+}
+
+/// Whether a URL the model returned really appears in the email it was given.
+/// Emails carry URLs HTML-escaped, so a decoded copy counts as verbatim too.
+fn quoted_verbatim(email: &str, url: &str) -> bool {
+    email.contains(url) || email.replace("&amp;", "&").contains(url)
+}
+
+/// Words compared for provenance: case- and punctuation-insensitive, so
+/// Markdown's own `**bold**` and `>` markers don't read as new writing.
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn hash(words: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    words.hash(&mut h);
+    h.finish()
+}
+
+/// Runs of this many words. Long enough that ordinary phrasing doesn't collide,
+/// short enough that a reordered sentence still registers as copied.
+const RUN_LEN: usize = 8;
+
+/// The share of the output's word-runs that also occur in the source material —
+/// how much of what the model wrote it was copying. `None` when the output is
+/// too short to measure.
+fn verbatim_share(output: &str, source: &str) -> Option<f32> {
+    let out = words(output);
+    if out.len() < RUN_LEN {
+        return None;
+    }
+    let seen: std::collections::HashSet<u64> = words(source).windows(RUN_LEN).map(hash).collect();
+    let total = out.len() - RUN_LEN + 1;
+    let hits = out.windows(RUN_LEN).filter(|w| seen.contains(&hash(w))).count();
+    Some(hits as f32 / total as f32)
 }
 
 /// Reads the link pass's JSON back into link items. The schema guarantees the
@@ -923,6 +1061,51 @@ mod tests {
             }
         }
         check(&link_schema());
+    }
+
+    /// The link pass is supposed to copy URLs, not compose them; this is the
+    /// check that says so in the log.
+    #[test]
+    fn spots_a_url_that_was_not_in_the_email() {
+        let email = r#"<a href="https://thebrowser.com/r/abc?m=1&amp;utm=x">Read</a>"#;
+        assert!(quoted_verbatim(email, "https://thebrowser.com/r/abc?m=1&amp;utm=x"));
+        // Same link, entity-decoded the way a model tends to write it back.
+        assert!(quoted_verbatim(email, "https://thebrowser.com/r/abc?m=1&utm=x"));
+        assert!(!quoted_verbatim(email, "https://thebrowser.com/r/invented"));
+    }
+
+    /// What the assemble pass is actually doing: near-total copying reads as
+    /// near-total, and prose the model wrote itself reads as near-zero.
+    #[test]
+    fn measures_how_much_of_the_output_was_copied() {
+        let source = "The rain in Spain falls mainly on the plain, and the plain \
+                      is where the rain is measured every single morning by hand.";
+
+        let copied = "**Rain** — the rain in Spain falls mainly on the plain, and the plain \
+                      is where the rain is measured every single morning by hand.";
+        assert!(verbatim_share(copied, source).unwrap() > 0.9);
+
+        let novel = "Quarterly logistics throughput improved once the depot switched \
+                     carriers, though nobody in procurement could say precisely why.";
+        assert!(verbatim_share(novel, source).unwrap() < 0.1);
+
+        // Too short to say anything about.
+        assert!(verbatim_share("no idea", source).is_none());
+    }
+
+    #[test]
+    fn tokens_per_sec_uses_generation_time_only() {
+        let msg = StreamedMessage {
+            output_tokens: 1000,
+            first_token_secs: 1.0,
+            total_secs: 11.0,
+            ..StreamedMessage::default()
+        };
+        assert_eq!(msg.tokens_per_sec(), 100.0);
+
+        // A call that returned everything at once must not divide by zero.
+        let instant = StreamedMessage { output_tokens: 5, ..StreamedMessage::default() };
+        assert!(instant.tokens_per_sec().is_finite());
     }
 
     #[test]
