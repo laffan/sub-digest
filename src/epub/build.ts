@@ -29,7 +29,8 @@ export async function generateEpub(
   settings: LayoutSettings,
   onProgress: GenerateProgress
 ): Promise<Extract<GeneratedOutput, { format: "epub" }>> {
-  const sorted = [...posts].sort((a, b) => a.dateMs - b.dateMs);
+  // Chapter order is the caller's order, set in the Organize step.
+  const sorted = posts;
   const range = dateRangeLabel(sorted);
   const title = range ? `Substack Digest, ${range}` : "Substack Digest";
   const publications = [...new Set(sorted.map((p) => p.publication))];

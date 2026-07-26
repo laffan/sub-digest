@@ -7,6 +7,8 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
+import { OrganizePanel } from "./components/OrganizePanel";
+import { ContentPreview } from "./components/ContentPreview";
 import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
@@ -30,6 +32,7 @@ import {
   DEFAULT_SETTINGS,
   outputFileName,
   type AgentConfig,
+  type Block,
   type DateRange,
   type DigestPost,
   type GeneratedOutput,
@@ -100,13 +103,21 @@ export default function App() {
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<GeneratedOutput | null>(null);
-  // Picking posts and setting up the output are separate steps in one column,
-  // so a selection can't be changed out from under a run in progress.
-  const [step, setStep] = useState<"select" | "output">("select");
+  // The column moves through the work in order — pick posts, watch them get
+  // read and set their running order, then choose an output format. Each step
+  // is settled before the next depends on it.
+  const [step, setStep] = useState<"select" | "organize" | "output">("select");
   const [showLog, setShowLog] = useState(false);
+  // Posts fetched and parsed, in the order they'll appear in the digest.
+  const [prepared, setPrepared] = useState<DigestPost[]>([]);
+  const [preparing, setPreparing] = useState(false);
+  const [prepareTotal, setPrepareTotal] = useState(0);
 
   // Fetched email bodies, cached by message id so re-generating is instant.
   const bodyCache = useRef(new Map<string, string>());
+  // Parsed blocks, likewise — agent runs cost money, so don't repeat one just
+  // because the user stepped back to change the selection.
+  const blocksCache = useRef(new Map<string, Block[]>());
 
   useEffect(() => {
     gmailStatus()
@@ -153,6 +164,12 @@ export default function App() {
   useEffect(() => {
     setOutput(null);
   }, [settings.format]);
+
+  // Agent settings decide how a post is parsed, so cached blocks are stale
+  // the moment they change.
+  useEffect(() => {
+    blocksCache.current.clear();
+  }, [agentConfigs, anthropicKey]);
 
   const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
@@ -257,18 +274,22 @@ export default function App() {
 
   const selectedCount = useMemo(() => posts.filter((p) => p.selected).length, [posts]);
 
-  const generate = useCallback(async () => {
-    const selected = posts.filter((p) => p.selected);
+  /**
+   * Fetches and parses every selected post, one at a time, so the Organize
+   * step can show them arriving. Starts chronological; the user reorders from
+   * there. Runs once on entering Organize, not on every Generate.
+   */
+  const organize = useCallback(async () => {
+    const selected = [...posts.filter((p) => p.selected)].sort((a, b) => a.dateMs - b.dateMs);
     if (selected.length === 0) return;
+    setStep("organize");
     setError(null);
-    setGenerating(true);
-    const startedAt = Date.now();
-    logInfo(
-      "render",
-      `Generating ${settings.format.toUpperCase()} from ${selected.length} posts`
-    );
+    setOutput(null);
+    setPrepared([]);
+    setPrepareTotal(selected.length);
+    setPreparing(true);
+    logInfo("render", `Preparing ${selected.length} posts`);
     try {
-      const digest: DigestPost[] = [];
       for (let i = 0; i < selected.length; i++) {
         const p = selected[i];
         report(`Fetching ${i + 1}/${selected.length}: ${p.subject}`);
@@ -279,43 +300,75 @@ export default function App() {
           logInfo("gmail", `Fetched "${p.subject}" (${body.length} chars)`);
         }
         const agent = agentConfigs[p.publication];
-        let blocks;
-        if (agent?.useAgent && anthropicKey.trim()) {
-          report(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
-          try {
-            const md = await anthropicProcess(anthropicKey, agent.instructions, p.subject, body);
-            blocks = markdownToBlocks(md, p.subject);
-            logInfo("agent", `"${p.subject}" → ${blocks.length} blocks from ${md.length} chars`);
-          } catch (e) {
-            // Fall back to the default parser rather than failing the whole run.
-            const detail = String(e);
-            if (/no article links/i.test(detail)) {
-              // Expected for anything that isn't a link roundup — note it and move on.
-              logWarn("agent", `No links found in "${p.subject}" — used default parsing`);
-            } else {
-              const message = `Agent failed for "${p.publication}" — used default parsing. ${detail}`;
-              setError(message);
-              logError("agent", message);
+        let blocks = blocksCache.current.get(p.id);
+        if (blocks === undefined) {
+          if (agent?.useAgent && anthropicKey.trim()) {
+            report(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
+            try {
+              const md = await anthropicProcess(anthropicKey, agent.instructions, p.subject, body);
+              blocks = markdownToBlocks(md, p.subject);
+              logInfo("agent", `"${p.subject}" → ${blocks.length} blocks from ${md.length} chars`);
+            } catch (e) {
+              // Fall back to the default parser rather than failing the whole run.
+              const detail = String(e);
+              if (/no article links/i.test(detail)) {
+                // Expected for anything that isn't a link roundup — note it and move on.
+                logWarn("agent", `No links found in "${p.subject}" — used default parsing`);
+              } else {
+                const message = `Agent failed for "${p.publication}" — used default parsing. ${detail}`;
+                setError(message);
+                logError("agent", message);
+              }
+              const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
+              blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
             }
+          } else {
             const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
             blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
+            logInfo("parse", `"${p.subject}" → ${blocks.length} blocks`);
           }
-        } else {
-          const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
-          blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
-          logInfo("parse", `"${p.subject}" → ${blocks.length} blocks`);
+          blocksCache.current.set(p.id, blocks);
         }
-        digest.push({
+        const post: DigestPost = {
           publication: p.publication,
           title: p.subject,
           dateMs: p.dateMs,
           blocks,
-        });
+        };
+        setPrepared((prev) => [...prev, post]);
       }
+      setProgress("");
+      logInfo("render", "All posts prepared");
+    } catch (e) {
+      fail("render", e);
+    } finally {
+      setPreparing(false);
+    }
+  }, [posts, agentConfigs, anthropicKey, report, fail]);
+
+  /** Reorders the digest; any document already generated no longer matches. */
+  const movePost = useCallback((index: number, delta: number) => {
+    setPrepared((prev) => {
+      const to = index + delta;
+      if (to < 0 || to >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[to]] = [next[to], next[index]];
+      return next;
+    });
+    setOutput(null);
+  }, []);
+
+  const generate = useCallback(async () => {
+    if (prepared.length === 0) return;
+    setError(null);
+    setGenerating(true);
+    const startedAt = Date.now();
+    logInfo("render", `Generating ${settings.format.toUpperCase()} from ${prepared.length} posts`);
+    try {
       if (settings.format === "epub") {
-        setOutput(await generateEpub(digest, settings, report));
+        setOutput(await generateEpub(prepared, settings, report));
       } else {
-        setOutput({ format: "pdf", bytes: await generatePdf(digest, settings, report) });
+        setOutput({ format: "pdf", bytes: await generatePdf(prepared, settings, report) });
       }
       setProgress("");
       logInfo("render", `Done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
@@ -324,7 +377,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [posts, settings, agentConfigs, anthropicKey, report, fail]);
+  }, [prepared, settings, report, fail]);
 
   const exportOutput = useCallback(async () => {
     if (!output) return;
@@ -405,11 +458,7 @@ export default function App() {
             {(posts.length > 0 || error) && (
               <div className="step-actions">
                 {posts.length > 0 && (
-                  <button
-                    className="primary"
-                    disabled={selectedCount === 0}
-                    onClick={() => setStep("output")}
-                  >
+                  <button className="primary" disabled={selectedCount === 0} onClick={organize}>
                     {selectedCount === 0
                       ? "Select some posts"
                       : `Continue with ${selectedCount} post${selectedCount === 1 ? "" : "s"}`}
@@ -419,16 +468,47 @@ export default function App() {
               </div>
             )}
           </>
-        ) : (
+        ) : step === "organize" ? (
           <>
             <div className="step-body">
               <button
                 className="back-link"
                 onClick={() => setStep("select")}
-                disabled={generating}
-                title={generating ? "Finish generating first" : "Back to post selection"}
+                disabled={preparing}
+                title={preparing ? "Wait for the posts to finish" : "Back to post selection"}
               >
                 ← {selectedCount} post{selectedCount === 1 ? "" : "s"} selected
+              </button>
+              <OrganizePanel
+                posts={prepared}
+                done={prepared.length}
+                total={prepareTotal}
+                preparing={preparing}
+                onMove={movePost}
+              />
+            </div>
+            <div className="step-actions">
+              <button
+                className="primary"
+                disabled={preparing || prepared.length === 0}
+                onClick={() => setStep("output")}
+              >
+                {preparing ? "Preparing…" : "Continue to output"}
+              </button>
+              {progress && <div className="progress">{progress}</div>}
+              {error && <div className="error">{error}</div>}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="step-body">
+              <button
+                className="back-link"
+                onClick={() => setStep("organize")}
+                disabled={generating}
+                title={generating ? "Finish generating first" : "Back to the running order"}
+              >
+                ← {prepared.length} post{prepared.length === 1 ? "" : "s"} in order
               </button>
               <h2 className="col-title">Output</h2>
               <SettingsPanel settings={settings} onChange={setSettings} />
@@ -436,7 +516,7 @@ export default function App() {
             <div className="step-actions">
               <button
                 className="primary generate"
-                disabled={generating || selectedCount === 0}
+                disabled={generating || prepared.length === 0}
                 onClick={generate}
               >
                 {generating ? "Generating…" : `Generate ${settings.format.toUpperCase()}`}
@@ -454,7 +534,11 @@ export default function App() {
       </aside>
 
       <main className="col col-preview">
-        <Preview output={output} />
+        {step === "organize" ? (
+          <ContentPreview posts={prepared} preparing={preparing} />
+        ) : (
+          <Preview output={output} />
+        )}
       </main>
 
       {showLog && <LogPane onClose={() => setShowLog(false)} />}

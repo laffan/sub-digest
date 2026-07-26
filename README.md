@@ -27,7 +27,7 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    newsletter with no article links is noted in the log and falls through to the
    normal parser.
 4. **Generate** — pick **PDF** or **EPUB** at the top of the middle column;
-   both take the same posts in the same chronological order.
+   both take the same posts in the order set in **Organize**.
 
    - **PDF** — a custom layout engine flows the posts (publication name, title,
      date, and body text) into fixed pages, with images floated to alternating
@@ -48,11 +48,20 @@ little magazine of your recent reading — or an EPUB for your e-reader.
      and line height carry over as the book's stylesheet. Text stays UTF-8, so
      emoji and CJK survive here even though the PDF drops them.
 
-The window has one working column beside the preview, and it moves through the
-two steps in order: pick your posts, hit **Continue**, and the column becomes
-the output settings (with a link back). A selection can't change under a run
-that's already going. The preview on the right shows the real generated PDF, or
-the EPUB's own markup and stylesheet for e-books.
+The window has one working column beside the preview, and it moves through
+three steps in order, each with a link back:
+
+1. **Select** — the account and the discovered posts.
+2. **Organize** — every selected post is fetched and parsed here, one at a
+   time, with progress at the top of the column and the running order below it;
+   **↑ ↓** on any row sets where it lands in the digest (it starts
+   chronological). The content accrues on the right as each post is read, so
+   you can see what was actually captured before generating anything.
+3. **Output** — format and its settings, then Generate.
+
+A selection can't change under a run that's already going. The preview on the
+right shows the real generated PDF, or the EPUB's own markup and stylesheet for
+e-books.
 
 The **log** button next to the gear opens a pane across the foot of the window:
 Gmail queries and match counts, every generation step, and the agent's own
@@ -215,6 +224,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
 | Log | `src/log.ts`, `src-tauri/src/log.rs` | Module-level store in the UI (any layer can write without prop drilling); the backend feeds it over a Tauri `log` event |
+| API transport | `src-tauri/src/anthropic.rs` | Responses are streamed (SSE), on a fresh HTTP/1.1 connection per request with no pooling — a silent request is what an idle-connection timeout kills, and a pooled or multiplexed connection carries that failure to the next call. First-token timing is logged, so a slow call can be told apart from a stalled one |
 
 Generated PDFs use the PDF standard fonts (Times, Helvetica, Courier), so
 files stay small; text outside WinAnsi (emoji, CJK) is dropped from output.

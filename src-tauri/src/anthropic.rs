@@ -5,9 +5,10 @@
 //! instructions; this module runs the transform and returns clean Markdown,
 //! which the frontend converts into layout blocks.
 //!
-//! The agent is equipped with a `fetch_page` tool (executed here in Rust) so it
-//! can scrape a linked article — optionally extracting only specific CSS
-//! selectors / DIVs — instead of the user paying tokens for whole pages.
+//! It runs in two passes with the fetching in between: the model names the
+//! newsletter's links (structured output), this module resolves and scrapes
+//! them, and a second call writes the entry from what came back. Deciding which
+//! URL to actually read is deliberately code's job, not the model's.
 
 use crate::log;
 use futures::StreamExt;
@@ -36,15 +37,14 @@ const CONNECT_TIMEOUT_SECS: u64 = 20;
 /// connection can't wedge a whole digest run.
 const REQUEST_TIMEOUT_SECS: u64 = 120;
 const FETCH_TIMEOUT_SECS: u64 = 45;
+/// Longest gap between bytes before a response is treated as dead. Streaming
+/// keeps traffic flowing, so a silence this long is a real stall rather than
+/// the model thinking.
+const READ_TIMEOUT_SECS: u64 = 45;
 /// Whole-run ceiling for one newsletter. Six rounds of model calls and page
 /// fetches can otherwise add up to something indistinguishable from a hang;
 /// past this the run gives up and the caller falls back to normal parsing.
 const AGENT_BUDGET_SECS: u64 = 240;
-/// Idle pooled connections are retired early, before the far end drops them.
-/// Reusing a keep-alive connection that has just gone away is the usual cause
-/// of a bare "error sending request": the POST fails and, not being idempotent,
-/// hyper won't replay it.
-const POOL_IDLE_SECS: u64 = 15;
 /// Total tries per API call, matching what the Anthropic SDKs do by default.
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -158,7 +158,16 @@ fn http() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .pool_idle_timeout(Duration::from_secs(POOL_IDLE_SECS))
+            // No pooling and no HTTP/2 for these calls. A pooled connection the
+            // far end has already dropped fails the next POST outright, and an
+            // h2 connection multiplexes that failure across everything sharing
+            // it. A fresh HTTP/1.1 connection per request costs a handshake and
+            // removes both. See the streaming note in `call` for the rest.
+            .pool_max_idle_per_host(0)
+            .http1_only()
+            // Nothing arriving for this long means the connection is dead,
+            // however healthy the socket looks.
+            .read_timeout(Duration::from_secs(READ_TIMEOUT_SECS))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
@@ -217,6 +226,82 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1).min(4)))
 }
 
+/// What a streamed response adds up to.
+#[derive(Default)]
+struct StreamedMessage {
+    text: String,
+    stop_reason: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    first_token_secs: f32,
+}
+
+/// Folds one SSE payload into the message being assembled. Anything not
+/// carrying content or bookkeeping (`ping`, block starts/stops) is ignored.
+fn apply_event(event: &Value, msg: &mut StreamedMessage) -> Result<(), String> {
+    match event["type"].as_str().unwrap_or("") {
+        "message_start" => {
+            let usage = &event["message"]["usage"];
+            msg.input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+        }
+        "content_block_delta" => {
+            if let Some(text) = event["delta"]["text"].as_str() {
+                msg.text.push_str(text);
+            }
+        }
+        "message_delta" => {
+            if let Some(stop) = event["delta"]["stop_reason"].as_str() {
+                msg.stop_reason = stop.to_string();
+            }
+            if let Some(out) = event["usage"]["output_tokens"].as_u64() {
+                msg.output_tokens = out;
+            }
+        }
+        "error" => {
+            let detail = event["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown streaming error");
+            return Err(format!("Anthropic stream error: {detail}"));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Consumes the SSE body. Streaming isn't for show here: a request that sits
+/// silent while the model works is exactly what an idle-connection timeout
+/// somewhere in the path kills, and the first-token timing it records says
+/// whether a slow call was slow to start or slow to finish.
+async fn read_stream(resp: reqwest::Response, started: Instant) -> Result<StreamedMessage, String> {
+    let mut msg = StreamedMessage::default();
+    let mut buffer = String::new();
+    let mut body = resp.bytes_stream();
+
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|e| format!("Anthropic stream cut short: {}", describe(&e)))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // SSE events are separated by a blank line.
+        while let Some(end) = buffer.find("\n\n") {
+            let raw: String = buffer.drain(..end + 2).collect();
+            for line in raw.lines() {
+                let Some(data) = line.strip_prefix("data:") else { continue };
+                let data = data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                let event: Value = serde_json::from_str(data)
+                    .map_err(|e| format!("bad Anthropic stream event: {e}"))?;
+                if msg.text.is_empty() && event["type"] == "content_block_delta" {
+                    msg.first_token_secs = started.elapsed().as_secs_f32();
+                }
+                apply_event(&event, &mut msg)?;
+            }
+        }
+    }
+    Ok(msg)
+}
+
 async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<Value, String> {
     if api_key.trim().is_empty() {
         return Err("no Anthropic API key set".to_string());
@@ -224,11 +309,13 @@ async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<Value, Stri
     let mut attempt: u32 = 1;
     loop {
         let started = Instant::now();
+        let mut streaming = body.clone();
+        streaming["stream"] = json!(true);
         let sent = http()
             .post(ANTHROPIC_URL)
             .header("x-api-key", api_key.trim())
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
+            .json(&streaming)
             .send()
             .await;
 
@@ -268,27 +355,28 @@ async fn call(app: &AppHandle, api_key: &str, body: Value) -> Result<Value, Stri
             }
             Ok(resp) => {
                 let status = resp.status();
-                let text = resp
-                    .text()
-                    .await
-                    .map_err(|e| format!("Anthropic reply cut short: {}", describe(&e)))?;
                 if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
                     return Err(error_message(status, &text));
                 }
-                let value: Value = serde_json::from_str(&text)
-                    .map_err(|e| format!("bad Anthropic response: {e}"))?;
+                let msg = read_stream(resp, started).await?;
                 log::info(
                     app,
                     "agent",
                     format!(
-                        "API replied in {:.1}s ({} in / {} out tokens, stop: {})",
+                        "API replied in {:.1}s, first token at {:.1}s ({} in / {} out tokens, stop: {})",
                         started.elapsed().as_secs_f32(),
-                        value["usage"]["input_tokens"].as_u64().unwrap_or(0),
-                        value["usage"]["output_tokens"].as_u64().unwrap_or(0),
-                        value["stop_reason"].as_str().unwrap_or("?")
+                        msg.first_token_secs,
+                        msg.input_tokens,
+                        msg.output_tokens,
+                        msg.stop_reason
                     ),
                 );
-                return Ok(value);
+                return Ok(json!({
+                    "content": [{ "type": "text", "text": msg.text }],
+                    "stop_reason": msg.stop_reason,
+                    "usage": { "input_tokens": msg.input_tokens, "output_tokens": msg.output_tokens },
+                }));
             }
         }
     }
@@ -835,6 +923,40 @@ mod tests {
             }
         }
         check(&link_schema());
+    }
+
+    #[test]
+    fn folds_a_streamed_message_together() {
+        let events = [
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":34329,"output_tokens":1}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"ping"}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Ogham"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and Hildegard"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":284}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+
+        let mut msg = StreamedMessage::default();
+        for raw in events {
+            apply_event(&serde_json::from_str(raw).unwrap(), &mut msg).unwrap();
+        }
+
+        assert_eq!(msg.text, "Ogham and Hildegard");
+        assert_eq!(msg.stop_reason, "end_turn");
+        assert_eq!(msg.input_tokens, 34329);
+        assert_eq!(msg.output_tokens, 284);
+    }
+
+    #[test]
+    fn streamed_error_events_surface() {
+        let event: Value = serde_json::from_str(
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        )
+        .unwrap();
+        let err = apply_event(&event, &mut StreamedMessage::default()).unwrap_err();
+        assert!(err.contains("Overloaded"), "{err}");
     }
 
     #[test]

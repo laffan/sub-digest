@@ -47,7 +47,9 @@ export async function generatePdf(
   settings: LayoutSettings,
   onProgress: GenerateProgress
 ): Promise<Uint8Array> {
-  const sorted = [...posts].sort((a, b) => a.dateMs - b.dateMs);
+  // The caller's order is the running order — the Organize step sets it, and
+  // it starts out chronological.
+  const sorted = posts;
 
   const doc = await PDFDocument.create();
   const title = dateRangeLabel(sorted) || "Substack Digest";
