@@ -269,6 +269,18 @@ body {
   flex-wrap: wrap;
 }
 
+.processed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.processed-row .hint {
+  margin: 0;
+}
+
 .test-ok {
   font-size: 12px;
   color: #3c9a5f;
@@ -685,6 +697,12 @@ button.link {
 
 .pub li label:hover {
   background: #f4f2ec;
+}
+
+/* Read in an earlier session. A marker only: the row still selects, scans and
+   generates exactly as any other. */
+.pub li.seen {
+  opacity: 0.5;
 }
 
 .post-title {

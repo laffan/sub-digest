@@ -8,6 +8,8 @@ interface Props {
   rangeValid: boolean;
   scanning: boolean;
   agentConfigs: Record<string, AgentConfig>;
+  /** Posts read in an earlier session — shown at half strength, nothing more. */
+  processed: ReadonlySet<string>;
   onDaysChange: (days: number) => void;
   onRangeChange: (range: DateRange) => void;
   onScan: () => void;
@@ -42,6 +44,7 @@ export function PostList({
   rangeValid,
   scanning,
   agentConfigs,
+  processed,
   onDaysChange,
   onRangeChange,
   onScan,
@@ -209,8 +212,12 @@ export function PostList({
               </div>
               <ul>
                 {pub.posts.map((p) => (
-                  <li key={p.id}>
-                    <label>
+                  <li key={p.id} className={processed.has(p.id) ? "seen" : undefined}>
+                    <label
+                      title={
+                        processed.has(p.id) ? "Already processed in an earlier session" : undefined
+                      }
+                    >
                       <input
                         type="checkbox"
                         checked={p.selected}

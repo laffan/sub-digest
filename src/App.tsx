@@ -12,6 +12,7 @@ import { ContentPreview } from "./components/ContentPreview";
 import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
+import { clearProcessed, loadProcessed, markProcessed } from "./processed";
 import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
@@ -124,6 +125,13 @@ export default function App() {
   // scrolls to it twice.
   const [focus, setFocus] = useState<{ id: string; n: number } | null>(null);
 
+  // Posts processed before this session began. It's a snapshot on purpose: a
+  // post read a minute ago shouldn't grey out under the user mid-run, so
+  // marking one now shows up the *next* time they scan. Purely a marker —
+  // nothing is skipped or deselected on the strength of it.
+  const [processedBefore, setProcessedBefore] = useState<ReadonlySet<string>>(loadProcessed);
+  const [processedCount, setProcessedCount] = useState(() => loadProcessed().size);
+
   // Fetched email bodies, cached by message id so re-generating is instant.
   const bodyCache = useRef(new Map<string, string>());
   // Prepared entries, likewise — agent runs cost money, so don't repeat one
@@ -186,6 +194,14 @@ export default function App() {
   useEffect(() => {
     setOutput(null);
   }, [removed]);
+
+  /** Forgets every remembered post, so nothing in the scan list is shaded. */
+  const forgetProcessed = useCallback(() => {
+    clearProcessed();
+    setProcessedBefore(new Set());
+    setProcessedCount(0);
+    logInfo("render", "Cleared the record of processed posts");
+  }, []);
 
   const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
@@ -374,6 +390,7 @@ export default function App() {
         const ready = entries;
         setPrepared((prev) => [...prev, ...ready]);
         setPrepareDone(i + 1);
+        setProcessedCount(markProcessed([p.id]));
       }
       setProgress("");
       logInfo("render", "All posts prepared");
@@ -535,6 +552,7 @@ export default function App() {
                   rangeValid={scanWindow !== null}
                   scanning={scanning}
                   agentConfigs={agentConfigs}
+                  processed={processedBefore}
                   onDaysChange={setDays}
                   onRangeChange={setRange}
                   onScan={scan}
@@ -654,6 +672,8 @@ export default function App() {
           onDomainsChange={setDomains}
           anthropicKey={anthropicKey}
           onAnthropicKeyChange={saveAnthropicKey}
+          processedCount={processedCount}
+          onForgetProcessed={forgetProcessed}
           onClose={() => setShowSettings(false)}
         />
       )}

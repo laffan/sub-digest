@@ -18,7 +18,10 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    `ghost.io`, `beehiiv.com`, or a specific sender like `news@example.com`).
 3. **Select** — check/uncheck whole publications or individual posts, or
    **shift-click** a post to select (or deselect) everything between it and
-   your last click, across publications. Each publication has a dropdown (the
+   your last click, across publications. Posts already fetched and parsed in an
+   earlier session are shown at half strength, so what's new stands out. It's a
+   marker and nothing else — those posts still select, scan and generate exactly
+   as any other, and Settings has a **Clear** to forget them. Each publication has a dropdown (the
    caret by its name) to enable a per-newsletter **AI agent** and give it
    instructions — built for link roundups, where the digest should carry the
    linked articles rather than a page of links. With an Anthropic API key (set
@@ -249,6 +252,7 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
 | Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark); a row's trash marks every block of that entry at once, so both land in the same place. Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
 | Reordering | `src/components/OrganizePanel.tsx` | Pointer events rather than HTML5 drag-and-drop, which touch devices don't fire — so the same code reorders under a mouse on the Mac and a finger on the iPad. A press only becomes a drag past a 4px threshold, leaving a plain click free to mean "show me this entry" |
+| Already-read marker | `src/processed.ts` | Message ids of posts that have been fetched and parsed, in `localStorage`, capped at 5,000 (oldest dropped). The set used for shading is read **once at startup**, so a post read a minute ago doesn't grey out under the user mid-run — it shows up the next time they scan. Purely cosmetic: nothing consults it to skip, filter or deselect |
 | Log | `src/log.ts`, `src-tauri/src/log.rs` | Module-level store in the UI (any layer can write without prop drilling); the backend feeds it over a Tauri `log` event |
 | API transport | `src-tauri/src/anthropic.rs` | Responses are streamed (SSE), on a fresh HTTP/1.1 connection per request with no pooling — a silent request is what an idle-connection timeout kills, and a pooled or multiplexed connection carries that failure to the next call. First-token timing is logged, so a slow call can be told apart from a stalled one |
 
@@ -271,6 +275,8 @@ nothing is dropped and the files stay small too.
 
 - Read-only Gmail scope; nothing is written to your mailbox.
 - OAuth tokens are stored in the app's local data directory only.
+- The record of which posts you've already processed is message ids on this
+  device, nothing more — no subjects, no content — and Settings clears it.
 - Email content and images are fetched directly from Google/Substack CDNs and
   never leave the device.
 - The AI agent is entirely opt-in and per-newsletter. When enabled, that

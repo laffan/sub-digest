@@ -6,6 +6,9 @@ interface Props {
   onDomainsChange: (domains: string[]) => void;
   anthropicKey: string;
   onAnthropicKeyChange: (key: string) => void;
+  /** How many posts are remembered as already processed. */
+  processedCount: number;
+  onForgetProcessed: () => void;
   onClose: () => void;
 }
 
@@ -27,6 +30,8 @@ export function SettingsModal({
   onDomainsChange,
   anthropicKey,
   onAnthropicKeyChange,
+  processedCount,
+  onForgetProcessed,
   onClose,
 }: Props) {
   const [input, setInput] = useState("");
@@ -150,6 +155,23 @@ export function SettingsModal({
           </button>
           {test.status === "ok" && <span className="test-ok">✓ {test.message}</span>}
           {test.status === "error" && <span className="test-err">{test.message}</span>}
+        </div>
+
+        <h3 className="modal-section">Processed posts</h3>
+        <p className="hint">
+          Posts that have been fetched and parsed are remembered between sessions and shown at
+          half strength when you scan, so it's easy to see what's new. It's only a marker —
+          nothing is skipped, filtered, or unselected because of it.
+        </p>
+        <div className="processed-row">
+          <span className="hint">
+            {processedCount === 0
+              ? "Nothing remembered yet."
+              : `${processedCount.toLocaleString()} post${processedCount === 1 ? "" : "s"} remembered.`}
+          </span>
+          <button className="secondary" disabled={processedCount === 0} onClick={onForgetProcessed}>
+            Clear
+          </button>
         </div>
 
         <div className="modal-foot">
