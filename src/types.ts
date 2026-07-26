@@ -19,6 +19,15 @@ export interface Publication {
   posts: Post[];
 }
 
+/** Timeframe sentinel: scan an explicit start/end date range instead of "last N days". */
+export const CUSTOM_RANGE = -1;
+
+/** An explicit scan window, as the `YYYY-MM-DD` strings a date input produces. */
+export interface DateRange {
+  start: string;
+  end: string;
+}
+
 /** Per-publication agent configuration, keyed by publication name. */
 export interface AgentConfig {
   useAgent: boolean;

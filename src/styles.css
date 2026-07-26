@@ -458,6 +458,18 @@ button.link {
   flex: none;
 }
 
+/* Start/end dates, shown when the timeframe is set to Range… */
+.range-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 10px;
+  margin: -4px 0 10px;
+}
+
+.range-row input {
+  margin-top: 2px;
+}
+
 .pub {
   margin-bottom: 12px;
 }

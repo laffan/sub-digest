@@ -37,9 +37,16 @@ export function gmailDisconnect(): Promise<void> {
   return invoke<void>("gmail_disconnect");
 }
 
-/** Lists emails from `domains` newer than `afterMs` (epoch millis). */
-export function gmailSearch(afterMs: number, domains: string[]): Promise<PostMeta[]> {
-  return invoke<PostMeta[]>("gmail_search", { afterMs, domains });
+/**
+ * Lists emails from `domains` between `afterMs` and `beforeMs` (epoch millis).
+ * Either bound may be 0, meaning open-ended on that side.
+ */
+export function gmailSearch(
+  afterMs: number,
+  beforeMs: number,
+  domains: string[]
+): Promise<PostMeta[]> {
+  return invoke<PostMeta[]>("gmail_search", { afterMs, beforeMs, domains });
 }
 
 /** Returns the HTML body of a message (plain text is wrapped by the backend). */

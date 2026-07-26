@@ -1,20 +1,25 @@
-import { useMemo, useState } from "react";
-import type { AgentConfig, Post, Publication } from "../types";
+import { useMemo, useRef, useState } from "react";
+import { CUSTOM_RANGE, type AgentConfig, type DateRange, type Post, type Publication } from "../types";
 
 interface Props {
   posts: Post[];
   days: number;
+  range: DateRange;
+  rangeValid: boolean;
   scanning: boolean;
   agentConfigs: Record<string, AgentConfig>;
   onDaysChange: (days: number) => void;
+  onRangeChange: (range: DateRange) => void;
   onScan: () => void;
   onTogglePost: (id: string) => void;
+  onSetPostsSelected: (ids: string[], selected: boolean) => void;
   onTogglePublication: (name: string, selected: boolean) => void;
   onToggleAgent: (name: string, useAgent: boolean) => void;
   onOpenAgentOptions: (name: string) => void;
 }
 
 // `days: 0` means no lower bound — search the entire archive.
+// `days: CUSTOM_RANGE` swaps the timeframe for an explicit start/end date.
 const TIMEFRAMES: { label: string; days: number }[] = [
   { label: "Last 7 days", days: 7 },
   { label: "Last 14 days", days: 14 },
@@ -24,6 +29,7 @@ const TIMEFRAMES: { label: string; days: number }[] = [
   { label: "Last year", days: 365 },
   { label: "Last 2 years", days: 730 },
   { label: "All time", days: 0 },
+  { label: "Range…", days: CUSTOM_RANGE },
 ];
 
 /** Matches MAX_MESSAGES in the Rust backend. */
@@ -32,16 +38,25 @@ const SCAN_LIMIT = 1000;
 export function PostList({
   posts,
   days,
+  range,
+  rangeValid,
   scanning,
   agentConfigs,
   onDaysChange,
+  onRangeChange,
   onScan,
   onTogglePost,
+  onSetPostsSelected,
   onTogglePublication,
   onToggleAgent,
   onOpenAgentOptions,
 }: Props) {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  // The post a shift-click extends the selection from: the last one clicked.
+  const anchorId = useRef<string | null>(null);
+  // A checkbox's change event carries no modifier keys, and React derives that
+  // event from the click — so the click handler stashes shift for it to read.
+  const shiftHeld = useRef(false);
 
   const publications = useMemo<Publication[]>(() => {
     const byName = new Map<string, Post[]>();
@@ -55,6 +70,27 @@ export function PostList({
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [posts]);
 
+  // Ids in the order they appear on screen, so a shift-click range covers
+  // exactly what the user sees between the two clicks.
+  const orderedIds = useMemo(
+    () => publications.flatMap((pub) => pub.posts.map((p) => p.id)),
+    [publications]
+  );
+
+  /** Extends the selection from the anchor to `id`; returns false if it can't. */
+  const extendSelection = (id: string, selected: boolean): boolean => {
+    const anchor = anchorId.current;
+    if (anchor === null || anchor === id) return false;
+    const from = orderedIds.indexOf(anchor);
+    const to = orderedIds.indexOf(id);
+    if (from < 0 || to < 0) return false;
+    const [lo, hi] = from < to ? [from, to] : [to, from];
+    onSetPostsSelected(orderedIds.slice(lo, hi + 1), selected);
+    return true;
+  };
+
+  const usingRange = days === CUSTOM_RANGE;
+
   return (
     <section className="panel posts">
       <h2 className="col-title">Posts</h2>
@@ -66,13 +102,44 @@ export function PostList({
             </option>
           ))}
         </select>
-        <button className="secondary" disabled={scanning} onClick={onScan}>
+        <button className="secondary" disabled={scanning || !rangeValid} onClick={onScan}>
           {scanning ? "Scanning…" : "Scan Mail"}
         </button>
       </div>
 
+      {usingRange && (
+        <div className="range-row">
+          <label>
+            From
+            <input
+              type="date"
+              value={range.start}
+              max={range.end || undefined}
+              onChange={(e) => onRangeChange({ ...range, start: e.target.value })}
+            />
+          </label>
+          <label>
+            To
+            <input
+              type="date"
+              value={range.end}
+              min={range.start || undefined}
+              onChange={(e) => onRangeChange({ ...range, end: e.target.value })}
+            />
+          </label>
+        </div>
+      )}
+
+      {usingRange && !rangeValid && (
+        <p className="hint warn">Pick a start and end date (start first) to scan a range.</p>
+      )}
+
       {posts.length === 0 && !scanning && (
         <p className="hint">Scan your mail to discover Substack posts (archived included).</p>
+      )}
+
+      {posts.length > 0 && (
+        <p className="hint">Shift-click to select through to your last click.</p>
       )}
 
       {posts.length >= SCAN_LIMIT && (
@@ -147,7 +214,21 @@ export function PostList({
                       <input
                         type="checkbox"
                         checked={p.selected}
-                        onChange={() => onTogglePost(p.id)}
+                        onClick={(e) => {
+                          shiftHeld.current = e.shiftKey;
+                        }}
+                        // A shift-click gives every post back to the last one
+                        // clicked the state this click produces here — which is
+                        // also the state the browser just toggled this box to,
+                        // so the checkbox and the range stay in agreement.
+                        onChange={() => {
+                          const shift = shiftHeld.current;
+                          shiftHeld.current = false;
+                          if (!shift || !extendSelection(p.id, !p.selected)) {
+                            onTogglePost(p.id);
+                          }
+                          anchorId.current = p.id;
+                        }}
                       />
                       <span className="post-title" title={p.subject}>
                         {p.subject}

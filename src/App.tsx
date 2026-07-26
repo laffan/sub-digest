@@ -21,10 +21,13 @@ import {
 import { parseEmailHtml, parsePlainText } from "./parse";
 import { generatePdf } from "./pdf/layout";
 import { generateEpub } from "./epub/build";
+import { dayEndMs, dayStartMs, isoLocalDay } from "./dates";
 import {
+  CUSTOM_RANGE,
   DEFAULT_SETTINGS,
   outputFileName,
   type AgentConfig,
+  type DateRange,
   type DigestPost,
   type GeneratedOutput,
   type LayoutSettings,
@@ -74,6 +77,11 @@ export default function App() {
   const [account, setAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [days, setDays] = useState(30);
+  // Only consulted when `days === CUSTOM_RANGE`; defaults to the last month.
+  const [range, setRange] = useState<DateRange>(() => ({
+    start: isoLocalDay(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    end: isoLocalDay(Date.now()),
+  }));
   const [scanning, setScanning] = useState(false);
   const [posts, setPosts] = useState<Post[]>([]);
   const [settings, setSettings] = useState<LayoutSettings>(loadSettings);
@@ -158,13 +166,26 @@ export default function App() {
     setOutput(null);
   }, []);
 
+  // The scan window, as epoch millis; 0 on either side means "open ended".
+  // A custom range is inclusive of both days, so the end bound is the midnight
+  // that closes it. Null means the range is incomplete or back to front.
+  const scanWindow = useMemo((): { after: number; before: number } | null => {
+    if (days !== CUSTOM_RANGE) {
+      // days === 0 → "All time": pass 0 so the backend omits the date filter.
+      return { after: days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0, before: 0 };
+    }
+    const after = dayStartMs(range.start);
+    const before = dayEndMs(range.end);
+    if (after === null || before === null || after >= before) return null;
+    return { after, before };
+  }, [days, range]);
+
   const scan = useCallback(async () => {
+    if (!scanWindow) return;
     setError(null);
     setScanning(true);
     try {
-      // days === 0 → "All time": pass 0 so the backend omits the date filter.
-      const afterMs = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
-      const metas = await gmailSearch(afterMs, domains);
+      const metas = await gmailSearch(scanWindow.after, scanWindow.before, domains);
       setPosts(
         metas
           .map((m) => ({
@@ -179,10 +200,16 @@ export default function App() {
     } finally {
       setScanning(false);
     }
-  }, [days, domains]);
+  }, [scanWindow, domains]);
 
   const togglePost = useCallback((id: string) => {
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, selected: !p.selected } : p)));
+  }, []);
+
+  /** Batch select/deselect, used by shift-click ranges in the post list. */
+  const setPostsSelected = useCallback((ids: string[], selected: boolean) => {
+    const inRange = new Set(ids);
+    setPosts((ps) => ps.map((p) => (inRange.has(p.id) ? { ...p, selected } : p)));
   }, []);
 
   const togglePublication = useCallback((name: string, selected: boolean) => {
@@ -288,11 +315,15 @@ export default function App() {
           <PostList
             posts={posts}
             days={days}
+            range={range}
+            rangeValid={scanWindow !== null}
             scanning={scanning}
             agentConfigs={agentConfigs}
             onDaysChange={setDays}
+            onRangeChange={setRange}
             onScan={scan}
             onTogglePost={togglePost}
+            onSetPostsSelected={setPostsSelected}
             onTogglePublication={togglePublication}
             onToggleAgent={toggleAgent}
             onOpenAgentOptions={setAgentOptionsFor}

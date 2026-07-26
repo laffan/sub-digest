@@ -360,6 +360,7 @@ pub async fn gmail_search(
     app: AppHandle,
     state: State<'_, AuthState>,
     after_ms: i64,
+    before_ms: i64,
     domains: Vec<String>,
 ) -> Result<Vec<PostMeta>, String> {
     let token = access_token(&app, &state).await?;
@@ -380,12 +381,15 @@ pub async fn gmail_search(
     };
 
     // `messages.list` with `q` searches all mail (archived included), minus
-    // spam/trash. A non-positive `after_ms` means "no lower bound" (All time).
-    let query = if after_ms > 0 {
-        format!("{from} after:{}", after_ms / 1000)
-    } else {
-        from
-    };
+    // spam/trash. A non-positive bound means "open ended" on that side: no
+    // `after_ms` is All time, no `before_ms` is up to now.
+    let mut query = from;
+    if after_ms > 0 {
+        query.push_str(&format!(" after:{}", after_ms / 1000));
+    }
+    if before_ms > 0 {
+        query.push_str(&format!(" before:{}", before_ms / 1000));
+    }
 
     // Page through matching message ids
     let mut ids: Vec<String> = Vec::new();

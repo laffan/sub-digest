@@ -12,11 +12,14 @@ little magazine of your recent reading — or an EPUB for your e-reader.
 2. **Scan** — finds every email from your configured sender domains
    (`substack.com` by default) across your whole mailbox (archived mail
    included, not just the inbox) within a timeframe you choose — from the last
-   7 days up to All time — and groups it by publication. The **gear** by the
+   7 days up to All time, or **Range…** for an explicit start and end date
+   (both days included) — and groups it by publication. The **gear** by the
    title opens a Settings modal where you add or remove domains (e.g.
    `ghost.io`, `beehiiv.com`, or a specific sender like `news@example.com`).
-3. **Select** — check/uncheck whole publications or individual posts. Each
-   publication has a dropdown (the caret by its name) to enable a per-newsletter
+3. **Select** — check/uncheck whole publications or individual posts, or
+   **shift-click** a post to select (or deselect) everything between it and
+   your last click, across publications. Each publication has a dropdown (the
+   caret by its name) to enable a per-newsletter
    **AI agent** and give it instructions — useful for link roundups or unusual
    layouts the default parser handles poorly. With an Anthropic API key (set in
    Settings), flagged newsletters are reformatted by the agent, which can also

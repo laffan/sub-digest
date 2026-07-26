@@ -12,6 +12,7 @@
 use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -25,6 +26,19 @@ const MAX_TOOL_ROUNDS: usize = 6;
 const MAX_TOOL_OUTPUT_CHARS: usize = 20_000;
 /// Cap on fetched page size before parsing.
 const MAX_FETCH_CHARS: usize = 2_000_000;
+
+const CONNECT_TIMEOUT_SECS: u64 = 20;
+/// A long newsletter on Haiku is well inside this; it exists so a stalled
+/// connection can't wedge a whole digest run.
+const REQUEST_TIMEOUT_SECS: u64 = 300;
+const FETCH_TIMEOUT_SECS: u64 = 45;
+/// Idle pooled connections are retired early, before the far end drops them.
+/// Reusing a keep-alive connection that has just gone away is the usual cause
+/// of a bare "error sending request": the POST fails and, not being idempotent,
+/// hyper won't replay it.
+const POOL_IDLE_SECS: u64 = 15;
+/// Total tries per API call, matching what the Anthropic SDKs do by default.
+const MAX_ATTEMPTS: u32 = 3;
 
 const BROWSER_UA: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
@@ -91,7 +105,14 @@ useful for discovering the right class/id to target in a follow-up call.",
 /// Dedicated HTTP client (no default UA — set per request for scraping).
 fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::new())
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .pool_idle_timeout(Duration::from_secs(POOL_IDLE_SECS))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 fn error_message(status: reqwest::StatusCode, body: &str) -> String {
@@ -103,24 +124,92 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
     format!("Anthropic API error ({status}): {body}")
 }
 
+/// Spells out *why* a request failed. reqwest's own message stops at
+/// "error sending request for url (…)", which names no cause; the DNS, TLS or
+/// connection detail that identifies the problem is down the source chain.
+fn describe(err: &reqwest::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        let msg = cause.to_string();
+        if !out.contains(&msg) {
+            out.push_str(": ");
+            out.push_str(&msg);
+        }
+        source = cause.source();
+    }
+    if err.is_timeout() {
+        out.push_str(" (timed out)");
+    } else if err.is_connect() {
+        out.push_str(" — could not reach the API; check your network, VPN or proxy");
+    }
+    out
+}
+
+/// Status codes worth another try: rate limits, overload, and gateway hiccups.
+fn retriable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// Honours a `retry-after` header (seconds), capped so a run can't stall.
+fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    let secs: u64 = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(secs.min(30)))
+}
+
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1).min(4)))
+}
+
 async fn call(api_key: &str, body: Value) -> Result<Value, String> {
     if api_key.trim().is_empty() {
         return Err("no Anthropic API key set".to_string());
     }
-    let resp = http()
-        .post(ANTHROPIC_URL)
-        .header("x-api-key", api_key.trim())
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Anthropic request failed: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(error_message(status, &text));
+    let mut attempt: u32 = 1;
+    loop {
+        let sent = http()
+            .post(ANTHROPIC_URL)
+            .header("x-api-key", api_key.trim())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&body)
+            .send()
+            .await;
+
+        match sent {
+            // A transport failure means the exchange didn't complete — most
+            // often a keep-alive connection the far end had already closed, or
+            // a brief network drop — so the call is worth repeating.
+            Err(e) if attempt < MAX_ATTEMPTS && (e.is_connect() || e.is_timeout() || e.is_request()) => {
+                tokio::time::sleep(backoff(attempt)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(format!("Anthropic request failed: {}", describe(&e))),
+            Ok(resp) if attempt < MAX_ATTEMPTS && retriable(resp.status()) => {
+                let wait = retry_after(&resp).unwrap_or_else(|| backoff(attempt));
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("Anthropic reply cut short: {}", describe(&e)))?;
+                if !status.is_success() {
+                    return Err(error_message(status, &text));
+                }
+                return serde_json::from_str(&text)
+                    .map_err(|e| format!("bad Anthropic response: {e}"));
+            }
+        }
     }
-    serde_json::from_str(&text).map_err(|e| format!("bad Anthropic response: {e}"))
 }
 
 /// Concatenates the text blocks of a Messages API response.
@@ -262,9 +351,10 @@ async fn fetch_page(url: &str, selector: Option<&str>, as_html: bool) -> Result<
     let resp = http()
         .get(parsed)
         .header("user-agent", BROWSER_UA)
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS)) // a slow page shouldn't hold up the run
         .send()
         .await
-        .map_err(|e| format!("fetch failed: {e}"))?;
+        .map_err(|e| format!("fetch failed: {}", describe(&e)))?;
     if !resp.status().is_success() {
         return Err(format!("fetch failed: HTTP {}", resp.status()));
     }
@@ -383,6 +473,46 @@ mod tests {
     #[test]
     fn missing_selector_errors() {
         assert!(extract(PAGE, Some(".does-not-exist"), false).is_err());
+    }
+
+    #[test]
+    fn retries_rate_limits_and_gateway_errors_only() {
+        use reqwest::StatusCode;
+        for code in [429, 500, 502, 503, 504, 529] {
+            assert!(retriable(StatusCode::from_u16(code).unwrap()), "{code} should retry");
+        }
+        for code in [200, 400, 401, 403, 404, 413] {
+            assert!(!retriable(StatusCode::from_u16(code).unwrap()), "{code} should not retry");
+        }
+    }
+
+    #[test]
+    fn backoff_grows_and_stays_bounded() {
+        assert!(backoff(1) < backoff(2) && backoff(2) < backoff(3));
+        assert!(backoff(99) <= Duration::from_secs(8));
+    }
+
+    /// The failure this guards against reports only "error sending request for
+    /// url (…)". Checks that the cause is appended, and that the kind really is
+    /// one the retry arm in `call` matches.
+    #[tokio::test]
+    async fn transport_failures_name_their_cause() {
+        // Nothing listens on port 1, so the connection is refused outright.
+        let err = reqwest::Client::new()
+            .post("http://127.0.0.1:1/v1/messages")
+            .send()
+            .await
+            .expect_err("connection should be refused");
+
+        assert!(
+            err.is_connect() || err.is_request() || err.is_timeout(),
+            "retry arm would not match this error: {err:?}"
+        );
+        let described = describe(&err);
+        assert!(
+            described.len() > err.to_string().len(),
+            "no cause appended to {described:?}"
+        );
     }
 
     #[test]

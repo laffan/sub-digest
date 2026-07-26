@@ -32,3 +32,34 @@ export function dateRangeLabel(posts: { dateMs: number }[]): string {
 export function isoDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
+
+/**
+ * Midnight *local* time at the start of a `YYYY-MM-DD` day, as epoch millis.
+ * `new Date("2026-07-01")` would parse as UTC and shift the day for anyone
+ * west of Greenwich, so the parts are split by hand. Returns null if unparsable.
+ */
+export function dayStartMs(isoDate: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(y, mo - 1, d);
+  // Rejects overflow like 2026-02-31, which Date would roll forward.
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) return null;
+  return date.getTime();
+}
+
+/** Midnight local time at the *end* of a day, i.e. the start of the next one. */
+export function dayEndMs(isoDate: string): number | null {
+  const start = dayStartMs(isoDate);
+  if (start === null) return null;
+  const next = new Date(start);
+  next.setDate(next.getDate() + 1); // handles DST and month/year ends
+  return next.getTime();
+}
+
+/** `YYYY-MM-DD` for a local date, the format `<input type="date">` expects. */
+export function isoLocalDay(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
