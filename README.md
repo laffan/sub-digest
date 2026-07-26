@@ -19,12 +19,13 @@ little magazine of your recent reading — or an EPUB for your e-reader.
 3. **Select** — check/uncheck whole publications or individual posts, or
    **shift-click** a post to select (or deselect) everything between it and
    your last click, across publications. Each publication has a dropdown (the
-   caret by its name) to enable a per-newsletter
-   **AI agent** and give it instructions — useful for link roundups or unusual
-   layouts the default parser handles poorly. With an Anthropic API key (set in
-   Settings), flagged newsletters are reformatted by the agent, which can also
-   **fetch a linked page and extract specific DIVs** to pull in just the content
-   it needs without spending tokens on whole pages.
+   caret by its name) to enable a per-newsletter **AI agent** and give it
+   instructions — built for link roundups, where the digest should carry the
+   linked articles rather than a page of links. With an Anthropic API key (set
+   in Settings), the model identifies the newsletter's article links, **the app
+   fetches them**, and the digest entry is written from what came back. A
+   newsletter with no article links is noted in the log and falls through to the
+   normal parser.
 4. **Generate** — pick **PDF** or **EPUB** at the top of the middle column;
    both take the same posts in the same chronological order.
 
@@ -206,7 +207,8 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
-| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for hard-to-parse newsletters; returns Markdown. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. Equipped with a `fetch_page` tool (scrape a URL, extract specific CSS selectors/DIVs). API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s per model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
+| Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for link-roundup newsletters; returns Markdown. Two model calls with the fetching in between: the first uses **structured outputs** (`output_config.format` with a JSON schema) to name the links, the app resolves and fetches them, the second writes the entry from the results. Strict capture-only prompt — reproduces only what it reads or scrapes, never invented text. API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s per model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
+| Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged |
 | PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib |
 | EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
@@ -236,7 +238,7 @@ nothing is dropped and the files stay small too.
 - Email content and images are fetched directly from Google/Substack CDNs and
   never leave the device.
 - The AI agent is entirely opt-in and per-newsletter. When enabled, that
-  newsletter's content (and any pages its `fetch_page` tool retrieves) is sent
+  newsletter's content — and the text of the pages its links point at — is sent
   to the Anthropic API for reformatting. The API key is stored only on this
-  device. `fetch_page` only requests http(s) URLs and refuses private/loopback
-  addresses.
+  device. Page fetches only request http(s) URLs and refuse private/loopback
+  addresses, both for the link itself and for wherever it redirects.

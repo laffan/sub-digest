@@ -8,7 +8,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
 import { LogPane } from "./components/LogPane";
-import { log, logError, logInfo, type LogLevel } from "./log";
+import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
 import { markdownToBlocks } from "./parse";
 import {
@@ -288,9 +288,15 @@ export default function App() {
             logInfo("agent", `"${p.subject}" → ${blocks.length} blocks from ${md.length} chars`);
           } catch (e) {
             // Fall back to the default parser rather than failing the whole run.
-            const message = `Agent failed for "${p.publication}" — used default parsing. ${String(e)}`;
-            setError(message);
-            logError("agent", message);
+            const detail = String(e);
+            if (/no article links/i.test(detail)) {
+              // Expected for anything that isn't a link roundup — note it and move on.
+              logWarn("agent", `No links found in "${p.subject}" — used default parsing`);
+            } else {
+              const message = `Agent failed for "${p.publication}" — used default parsing. ${detail}`;
+              setError(message);
+              logError("agent", message);
+            }
             const isHtml = /<\/?[a-z][\s\S]*>/i.test(body.slice(0, 500));
             blocks = isHtml ? parseEmailHtml(body, p.subject) : parsePlainText(body);
           }

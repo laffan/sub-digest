@@ -23,9 +23,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// capture-only prompt it reformats/scrapes without inventing content.
 const MODEL: &str = "claude-haiku-4-5";
 const MAX_CONTENT_CHARS: usize = 60_000;
-/// Cap on the agent's tool-call rounds, to bound token/time cost per newsletter.
-const MAX_TOOL_ROUNDS: usize = 6;
-/// Cap on each tool result handed back to the model.
+/// Cap on each fetched page handed back to the model.
 const MAX_TOOL_OUTPUT_CHARS: usize = 20_000;
 /// Pages fetched at once. A link roundup can ask for a dozen in one turn;
 /// firing them all together buries the machine and looks like a stall.
@@ -54,19 +52,39 @@ const BROWSER_UA: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
+const LINK_PROMPT: &str = "You are given one email newsletter. Identify the \
+outbound links to articles it is recommending, and return them in the required \
+JSON shape.\n\n\
+Rules:\n\
+- Include a link only when the newsletter is pointing the reader at a piece of \
+writing: an article, essay, story, paper, or post.\n\
+- Exclude the newsletter's own chrome: subscribe/unsubscribe, 'view in browser', \
+'read in app', comment/like/share/restack, social profiles, app stores, \
+sponsor/advertisement links, the publication's own archive or homepage, and \
+anything pointing at an email address.\n\
+- Copy each URL exactly as it appears in the email, character for character. Do \
+not clean, shorten, unwrap, or resolve it — that is handled downstream.\n\
+- Take the title and the note verbatim from the newsletter's own words. Never \
+write a description of your own; if the newsletter gives none, leave the note \
+empty.\n\
+- List each distinct article once, in the order the newsletter presents them.\n\
+- If the newsletter recommends no articles, return an empty list. Do not invent \
+links to fill it.\n\n\
+If the per-newsletter instructions name a CSS selector to pull content out of \
+the linked pages, return it as `selector`; otherwise return an empty string.";
+
 const SYSTEM_PROMPT: &str = "You assemble one email newsletter into clean Markdown \
-for a printed reading digest. You are given the raw email (HTML or plain text) \
-plus optional per-newsletter instructions, and you have a `fetch_page` tool that \
-retrieves linked web pages.\n\n\
+for a printed reading digest. You are given the raw email (HTML or plain text), \
+optional per-newsletter instructions, and the text of the pages its links point \
+to, already fetched for you.\n\n\
 ABSOLUTE RULE — capture only, never invent:\n\
-- Every word you output must come verbatim from the provided email or from a page \
-you retrieved with `fetch_page`. Do NOT write anything from your own knowledge, \
-memory, or imagination.\n\
-- If the instructions ask you to include a linked article's content, you MUST \
-call `fetch_page` on that link and use only what it returns. Never reconstruct, \
-guess, paraphrase, or 'fill in' an article you have not actually fetched.\n\
-- If a fetch fails, is blocked, or returns no usable content, output the item's \
-title followed by '(content unavailable)'. Do NOT fabricate a substitute.\n\
+- Every word you output must come verbatim from the provided email or from the \
+fetched pages below it. Do NOT write anything from your own knowledge, memory, \
+or imagination.\n\
+- Use only the fetched text supplied here. Never reconstruct, guess, paraphrase, \
+or 'fill in' an article whose text is not present.\n\
+- If a page could not be fetched, output the item's title followed by \
+'(content unavailable)'. Do NOT fabricate a substitute.\n\
 - Add no opinions, commentary, introductions, transitions, or embellishments of \
 your own. Do not summarize unless the instructions explicitly ask; when you must \
 condense, use only wording drawn from the source.\n\n\
@@ -82,34 +100,55 @@ title in bold, the destination URL in parentheses if present, then any \
 description the source itself provides.\n\
 - Strip navigation, subscribe/unsubscribe prompts, social-share buttons, \
 'view in browser', paid-upgrade CTAs, comment/like widgets, and footers/legal.\n\n\
-Using the tool:\n\
-- Fetch a page only when the newsletter's own text is insufficient and the \
-instructions call for linked content. Prefer a CSS `selector` (e.g. 'article', \
-'.post-content', '#main') so you get just the article body and keep costs low. \
-Fetch no more pages than the task needs.\n\n\
 Per-newsletter instructions, when present, take priority over these formatting \
 defaults — but the ABSOLUTE RULE always holds.";
 
-fn tools() -> Value {
-    json!([{
-        "name": "fetch_page",
-        "description": "Fetch a web page over HTTP(S) and return its content. \
-By default returns the page's readable text (paragraphs, headings, list items — \
-scripts, styles, and navigation excluded), which is token-efficient. Pass a CSS \
-`selector` to return only the matching elements (e.g. 'article', '.post-content', \
-'#main') — use this to extract a specific DIV/container and avoid unrelated page \
-chrome. Set `as_html` to true to get the matched elements' inner HTML with tags, \
-useful for discovering the right class/id to target in a follow-up call.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "Absolute http(s) URL to fetch." },
-                "selector": { "type": "string", "description": "Optional CSS selector; return only matching elements. Omit for the page's readable text." },
-                "as_html": { "type": "boolean", "description": "If true, return matched elements' inner HTML instead of plain text. Requires a selector." }
+/// The shape the link pass must return. Structured outputs require
+/// `additionalProperties: false` on every object and every property listed in
+/// `required`, so optional fields are modelled as empty strings.
+fn link_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "description": "The articles this newsletter recommends, in order.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "The item's title, in the newsletter's own words."
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "The link's destination exactly as written in the email."
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "The newsletter's own description of the item, or an empty string."
+                        }
+                    },
+                    "required": ["title", "url", "note"],
+                    "additionalProperties": false
+                }
             },
-            "required": ["url"]
-        }
-    }])
+            "selector": {
+                "type": "string",
+                "description": "CSS selector to extract from the linked pages if the per-newsletter instructions name one, otherwise an empty string."
+            }
+        },
+        "required": ["items", "selector"],
+        "additionalProperties": false
+    })
+}
+
+/// One article the newsletter points at, as the model read it out of the email.
+#[derive(Debug, Clone)]
+struct LinkItem {
+    title: String,
+    url: String,
+    note: String,
 }
 
 /// Dedicated HTTP client (no default UA — set per request for scraping).
@@ -344,127 +383,217 @@ async fn run_agent(
         ),
     );
 
-    let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": user })];
-
-    for round in 1..=MAX_TOOL_ROUNDS {
-        log::info(app, "agent", format!("Round {round}/{MAX_TOOL_ROUNDS}: asking the model"));
-        let body = json!({
-            "model": MODEL,
-            "max_tokens": 8000,
-            "temperature": 0, // deterministic, faithful capture — no creative drift
-            "system": SYSTEM_PROMPT,
-            "tools": tools(),
-            "messages": messages,
-        });
-        let resp = call(app, &api_key, body).await?;
-        let stop = resp["stop_reason"].as_str().unwrap_or("");
-
-        if stop == "refusal" {
-            return Err("the model declined to process this newsletter".to_string());
-        }
-        if stop == "tool_use" {
-            // Record the assistant turn, then answer every tool call it made.
-            messages.push(json!({ "role": "assistant", "content": resp["content"].clone() }));
-
-            let calls: Vec<(String, Value)> = resp["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|b| b["type"] == "tool_use")
-                .map(|b| (b["id"].as_str().unwrap_or("").to_string(), b.clone()))
-                .collect();
-
-            log::info(
-                app,
-                "agent",
-                format!("Round {round}: {} page fetch(es) requested", calls.len()),
-            );
-
-            let results: Vec<Value> = futures::stream::iter(calls.into_iter().map(
-                |(id, block)| async move {
-                    match run_tool(app, &block).await {
-                        Ok(text) => json!({ "type": "tool_result", "tool_use_id": id, "content": text }),
-                        Err(e) => {
-                            json!({ "type": "tool_result", "tool_use_id": id, "content": e, "is_error": true })
-                        }
-                    }
-                },
-            ))
-            .buffered(MAX_CONCURRENT_FETCHES)
-            .collect()
-            .await;
-
-            messages.push(json!({ "role": "user", "content": results }));
-            continue;
-        }
-
-        // Terminal turn — return the Markdown it produced.
-        let markdown = extract_text(&resp);
-        if markdown.trim().is_empty() {
-            return Err(format!("the agent returned no content (stop reason: {stop})"));
-        }
+    // Pass 1 — the model's only job is naming the links.
+    let (links, selector) = extract_links(app, &api_key, &user).await?;
+    if links.is_empty() {
+        return Err("no article links found in this email".to_string());
+    }
+    log::info(app, "agent", format!("{} link(s) identified:", links.len()));
+    for (i, link) in links.iter().enumerate() {
         log::info(
             app,
             "agent",
-            format!(
-                "Finished \"{}\" in {:.1}s: {} chars of Markdown",
-                subject.trim(),
-                started.elapsed().as_secs_f32(),
-                markdown.chars().count()
-            ),
+            format!("  {}. {} — {}", i + 1, log::ellipsize(&link.title, 70), link.url),
         );
-        return Ok(markdown);
+    }
+    if let Some(sel) = &selector {
+        log::info(app, "agent", format!("Using selector from instructions: {sel}"));
     }
 
-    Err(format!(
-        "the agent still wanted more pages after {MAX_TOOL_ROUNDS} rounds; giving up"
-    ))
+    // Pass 2 — we do the fetching, so the URL we retrieve is one we can see.
+    let sel = selector.as_deref();
+    let articles: Vec<(LinkItem, Result<String, String>)> =
+        futures::stream::iter(links.into_iter().map(|link| async move {
+            let text = resolve_and_fetch(app, &link.url, sel).await;
+            (link, text)
+        }))
+        .buffered(MAX_CONCURRENT_FETCHES)
+        .collect()
+        .await;
+
+    let fetched = articles.iter().filter(|(_, r)| r.is_ok()).count();
+    log::info(
+        app,
+        "agent",
+        format!("{fetched}/{} page(s) fetched", articles.len()),
+    );
+
+    // Pass 3 — assemble the Markdown from the email plus what was fetched.
+    let mut dossier = String::from("Fetched pages for the newsletter's links:\n");
+    for (i, (link, text)) in articles.iter().enumerate() {
+        dossier.push_str(&format!("\n--- Item {} ---\nTitle: {}\nURL: {}\n", i + 1, link.title, link.url));
+        if !link.note.trim().is_empty() {
+            dossier.push_str(&format!("Newsletter's note: {}\n", link.note));
+        }
+        match text {
+            Ok(body) => dossier.push_str(&format!("Page text:\n{body}\n")),
+            Err(e) => dossier.push_str(&format!("Page text: (content unavailable — {e})\n")),
+        }
+    }
+
+    let body = json!({
+        "model": MODEL,
+        "max_tokens": 8000,
+        "temperature": 0, // deterministic, faithful capture — no creative drift
+        "system": SYSTEM_PROMPT,
+        "messages": [{ "role": "user", "content": format!("{user}\n\n{dossier}") }],
+    });
+    log::info(app, "agent", "Assembling the digest entry");
+    let resp = call(app, &api_key, body).await?;
+    if resp["stop_reason"].as_str() == Some("refusal") {
+        return Err("the model declined to process this newsletter".to_string());
+    }
+
+    let markdown = extract_text(&resp);
+    if markdown.trim().is_empty() {
+        return Err(format!(
+            "the agent returned no content (stop reason: {})",
+            resp["stop_reason"].as_str().unwrap_or("?")
+        ));
+    }
+    log::info(
+        app,
+        "agent",
+        format!(
+            "Finished \"{}\" in {:.1}s: {} chars of Markdown",
+            subject.trim(),
+            started.elapsed().as_secs_f32(),
+            markdown.chars().count()
+        ),
+    );
+    Ok(markdown)
+}
+
+/// Pass 1: the model reads the email and names the links, in a fixed JSON shape
+/// (structured outputs) rather than free-form text we'd have to parse.
+async fn extract_links(
+    app: &AppHandle,
+    api_key: &str,
+    user: &str,
+) -> Result<(Vec<LinkItem>, Option<String>), String> {
+    let body = json!({
+        "model": MODEL,
+        "max_tokens": 4000,
+        "temperature": 0,
+        "system": LINK_PROMPT,
+        "output_config": { "format": { "type": "json_schema", "schema": link_schema() } },
+        "messages": [{ "role": "user", "content": user }],
+    });
+    log::info(app, "agent", "Identifying the newsletter's links");
+    let resp = call(app, api_key, body).await?;
+    if resp["stop_reason"].as_str() == Some("refusal") {
+        return Err("the model declined to read this newsletter".to_string());
+    }
+
+    parse_link_response(&extract_text(&resp))
+}
+
+/// Reads the link pass's JSON back into link items. The schema guarantees the
+/// shape, so this only has to drop entries with no URL and normalise blanks.
+fn parse_link_response(text: &str) -> Result<(Vec<LinkItem>, Option<String>), String> {
+    let parsed: Value = serde_json::from_str(text.trim())
+        .map_err(|e| format!("link list wasn't valid JSON: {e}"))?;
+
+    let items = parsed["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let url = item["url"].as_str().unwrap_or("").trim().to_string();
+            if url.is_empty() {
+                return None;
+            }
+            Some(LinkItem {
+                title: item["title"].as_str().unwrap_or("").trim().to_string(),
+                url,
+                note: item["note"].as_str().unwrap_or("").trim().to_string(),
+            })
+        })
+        .collect();
+
+    let selector = parsed["selector"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Ok((items, selector))
 }
 
 // ---------------------------------------------------------------------------
-// Tools
+// Fetching
 
-async fn run_tool(app: &AppHandle, block: &Value) -> Result<String, String> {
-    let name = block["name"].as_str().unwrap_or("");
-    let input = &block["input"];
-    match name {
-        "fetch_page" => {
-            let url = input["url"].as_str().ok_or("fetch_page: missing 'url'")?;
-            let selector = input["selector"].as_str().filter(|s| !s.trim().is_empty());
-            let as_html = input["as_html"].as_bool().unwrap_or(false);
-            let started = Instant::now();
-            log::info(
-                app,
-                "fetch",
-                format!(
-                    "GET {}{}{}",
-                    log::ellipsize(url, 120),
-                    selector.map(|s| format!(" [{s}]")).unwrap_or_default(),
-                    if as_html { " (html)" } else { "" }
-                ),
-            );
-            let result = fetch_page(url, selector, as_html).await;
-            match &result {
-                Ok(text) => log::info(
+/// Follows a newsletter's redirect wrapper to the real article, then retries
+/// without the query string: the tracking parameters those wrappers append
+/// (`?ref=`, `?m=`, campaign ids) can land on an error or interstitial page,
+/// where the bare URL serves the article. Falls back to whatever the original
+/// URL gave if the trimmed one doesn't work out. Every step is logged, since
+/// which URL was actually read is the thing worth being able to check.
+async fn resolve_and_fetch(
+    app: &AppHandle,
+    requested: &str,
+    selector: Option<&str>,
+) -> Result<String, String> {
+    let started = Instant::now();
+    log::info(app, "fetch", format!("GET {}", log::ellipsize(requested, 140)));
+
+    let (landed, text) = fetch_url(requested, selector).await.map_err(|e| {
+        log::warn(
+            app,
+            "fetch",
+            format!("{e} after {:.1}s — {}", started.elapsed().as_secs_f32(), log::ellipsize(requested, 100)),
+        );
+        e
+    })?;
+
+    if landed.as_str() != requested {
+        log::info(app, "fetch", format!("  redirected to {}", log::ellipsize(landed.as_str(), 140)));
+    }
+
+    // Retry on the bare URL when the destination carries a query string.
+    if let Some(bare) = without_query(&landed) {
+        log::info(app, "fetch", format!("  retrying without query: {}", log::ellipsize(bare.as_str(), 140)));
+        match fetch_url(bare.as_str(), selector).await {
+            Ok((_, clean_text)) if !clean_text.trim().is_empty() => {
+                log::info(
                     app,
                     "fetch",
                     format!(
-                        "{} chars in {:.1}s from {}",
-                        text.chars().count(),
-                        started.elapsed().as_secs_f32(),
-                        log::ellipsize(url, 90)
+                        "  used {} — {} chars in {:.1}s",
+                        log::ellipsize(bare.as_str(), 100),
+                        clean_text.chars().count(),
+                        started.elapsed().as_secs_f32()
                     ),
-                ),
-                Err(e) => log::warn(
-                    app,
-                    "fetch",
-                    format!("{e} after {:.1}s — {}", started.elapsed().as_secs_f32(), log::ellipsize(url, 90)),
-                ),
+                );
+                return Ok(clean_text);
             }
-            result
+            Ok(_) => log::warn(app, "fetch", "  bare URL returned nothing; keeping the original"),
+            Err(e) => log::warn(app, "fetch", format!("  bare URL failed ({e}); keeping the original")),
         }
-        other => Err(format!("unknown tool: {other}")),
     }
+
+    log::info(
+        app,
+        "fetch",
+        format!(
+            "  used {} — {} chars in {:.1}s",
+            log::ellipsize(landed.as_str(), 100),
+            text.chars().count(),
+            started.elapsed().as_secs_f32()
+        ),
+    );
+    Ok(text)
+}
+
+/// The same URL without its query string or fragment, or None when there was
+/// nothing to strip.
+fn without_query(url: &url::Url) -> Option<url::Url> {
+    if url.query().is_none() && url.fragment().is_none() {
+        return None;
+    }
+    let mut bare = url.clone();
+    bare.set_query(None);
+    bare.set_fragment(None);
+    Some(bare)
 }
 
 fn host_blocked(host: &str) -> bool {
@@ -481,7 +610,9 @@ fn host_blocked(host: &str) -> bool {
     }
 }
 
-async fn fetch_page(url: &str, selector: Option<&str>, as_html: bool) -> Result<String, String> {
+/// Fetches one URL and returns the URL it actually landed on together with the
+/// page's readable text.
+async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, String), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("only http(s) URLs can be fetched".to_string());
@@ -497,6 +628,13 @@ async fn fetch_page(url: &str, selector: Option<&str>, as_html: bool) -> Result<
         .send()
         .await
         .map_err(|e| format!("fetch failed: {}", describe(&e)))?;
+
+    // Redirects are followed, so the host check has to be repeated on whatever
+    // the chain ended at — otherwise a wrapper could point back inside the machine.
+    let landed = resp.url().clone();
+    if landed.host_str().map(host_blocked).unwrap_or(true) {
+        return Err("redirected to a private or loopback address".to_string());
+    }
     if !resp.status().is_success() {
         return Err(format!("fetch failed: HTTP {}", resp.status()));
     }
@@ -508,8 +646,8 @@ async fn fetch_page(url: &str, selector: Option<&str>, as_html: bool) -> Result<
     };
 
     // Parse + extract synchronously (scraper's Html isn't Send; no awaits here).
-    let out = extract(&body, selector, as_html)?;
-    Ok(truncate_output(out))
+    let out = extract(&body, selector, false)?;
+    Ok((landed, truncate_output(out)))
 }
 
 fn extract(html: &str, selector: Option<&str>, as_html: bool) -> Result<String, String> {
@@ -615,6 +753,88 @@ mod tests {
     #[test]
     fn missing_selector_errors() {
         assert!(extract(PAGE, Some(".does-not-exist"), false).is_err());
+    }
+
+    /// The newsletter case this pipeline exists for: a redirect wrapper lands
+    /// on the article with tracking parameters attached, and the bare URL is
+    /// what actually serves the piece.
+    #[test]
+    fn strips_the_query_from_a_resolved_link() {
+        let landed = url::Url::parse(
+            "https://alexanderlarman.substack.com/p/the-greatness-of-david-lean?ref=thebrowser.com",
+        )
+        .unwrap();
+        assert_eq!(
+            without_query(&landed).unwrap().as_str(),
+            "https://alexanderlarman.substack.com/p/the-greatness-of-david-lean"
+        );
+
+        let fragment = url::Url::parse("https://example.com/piece#section-2").unwrap();
+        assert_eq!(without_query(&fragment).unwrap().as_str(), "https://example.com/piece");
+
+        // Nothing to strip — don't spend a second request.
+        assert!(without_query(&url::Url::parse("https://example.com/piece").unwrap()).is_none());
+    }
+
+    #[test]
+    fn reads_back_the_structured_link_list() {
+        let (items, selector) = parse_link_response(
+            r#"{"items":[
+                 {"title":"The Greatness of David Lean","url":"https://thebrowser.com/r/abc?m=1","note":"On Lawrence."},
+                 {"title":"No link here","url":"","note":""},
+                 {"title":" Padded ","url":" https://example.com/x ","note":" "}
+               ],"selector":"article"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 2, "entries without a URL should be dropped");
+        assert_eq!(items[0].url, "https://thebrowser.com/r/abc?m=1");
+        assert_eq!(items[1].title, "Padded");
+        assert_eq!(items[1].url, "https://example.com/x");
+        assert_eq!(items[1].note, "");
+        assert_eq!(selector.as_deref(), Some("article"));
+    }
+
+    #[test]
+    fn empty_link_list_parses_to_no_items() {
+        let (items, selector) = parse_link_response(r#"{"items":[],"selector":""}"#).unwrap();
+        assert!(items.is_empty());
+        assert!(selector.is_none(), "a blank selector means none, not Some(\"\")");
+    }
+
+    /// Structured outputs reject a schema whose objects allow extra properties
+    /// or leave any property optional, so hold the schema to both rules.
+    #[test]
+    fn link_schema_meets_structured_output_rules() {
+        fn check(node: &Value) {
+            if node["type"] == "object" {
+                assert_eq!(
+                    node["additionalProperties"], false,
+                    "every object needs additionalProperties: false — {node}"
+                );
+                let props: Vec<&String> = node["properties"]
+                    .as_object()
+                    .expect("object schema has properties")
+                    .keys()
+                    .collect();
+                let required: Vec<String> = node["required"]
+                    .as_array()
+                    .expect("object schema has required")
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                for p in props {
+                    assert!(required.contains(p), "property {p} must be required");
+                }
+                for (_, child) in node["properties"].as_object().unwrap() {
+                    check(child);
+                }
+            }
+            if node["type"] == "array" {
+                check(&node["items"]);
+            }
+        }
+        check(&link_schema());
     }
 
     #[test]
