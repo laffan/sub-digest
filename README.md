@@ -9,13 +9,27 @@ little magazine of your recent reading — or an EPUB for your e-reader.
 1. **Connect Gmail** — sign in with Google (OAuth, read-only scope). You
    provide your own OAuth client ID/secret; tokens are stored locally on the
    device and mail is only ever read, never modified.
-2. **Scan** — finds every email from your configured sender domains
-   (`substack.com` by default) across your whole mailbox (archived mail
-   included, not just the inbox) within a timeframe you choose — from the last
-   7 days up to All time, or **Range…** for an explicit start and end date
-   (both days included) — and groups it by publication. The **gear** by the
-   title opens a Settings modal where you add or remove domains (e.g.
-   `ghost.io`, `beehiiv.com`, or a specific sender like `news@example.com`).
+2. **Scan** — finds every email your **filters** match, across your whole
+   mailbox (archived mail included, not just the inbox) within a timeframe you
+   choose — from the last 7 days up to All time, or **Range…** for an explicit
+   start and end date (both days included) — and groups it by publication.
+
+   **Filters**, beside the Posts heading, lists what you've saved with a
+   checkbox on each, and a scan uses the ones you've ticked. **Edit Filters…**
+   at the foot of that list opens the editor, where filters are added and
+   removed. A filter is any combination of four kinds of criterion: sender
+   domains (`substack.com`, `ghost.io`), whole addresses
+   (`news@example.com`), text the **subject line** has to contain (newsletters
+   tend to run the same words every issue — `Weekly Digest`, `Issue #`), and
+   search terms matched anywhere in the message. Within one filter every kind
+   you set has to hold and any one value of that kind will do, so
+   `substack.com` plus the subject slice `Weekly` finds Substack mail whose
+   subject carries "Weekly" and nothing else. Across filters it's an OR: each
+   one is its own way in, and the scan is a single Gmail query either way.
+
+   Filters live on the device. An install that predates them carries its
+   sender domains across as one filter, so it keeps finding what it always
+   found.
 3. **Select** — check/uncheck whole publications or individual posts, or
    **shift-click** a post to select (or deselect) everything between it and
    your last click, across publications. Posts already fetched and parsed in an
@@ -240,6 +254,8 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 | Gmail OAuth (PKCE) | `src-tauri/src/oauth.rs` | Shared PKCE/token core + desktop loopback flow (fixed 127.0.0.1 port) |
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
+| Mail filters | `src/filters.ts`, `src/components/FilterEditorModal.tsx` | The saved filters and their storage, including the migration from the sender-domain list that came before. Values are normalized on the way in — a pasted `https://ghost.io/blog` becomes `ghost.io`, `Nate <news@example.com>` becomes the address — so what's stored is what a query can use |
+| Filters → Gmail query | `src-tauri/src/gmail.rs` | Domains and whole addresses are alternatives on one `from:` (no message is from two senders); subject slices become `subject:("…" OR "…")`, search terms bare phrases, and the kinds are ANDed. Enabled filters are ORed inside one parenthesized group so the date window applies to all of them. Quotes are what delimits a phrase, so they're stripped from the text rather than escaped, and a `from:` operand that would need quoting is dropped instead — a filter can't break out of its own query. Unit-tested |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
 | Per-newsletter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) for link-roundup newsletters; returns one entry per linked article. **Exactly one model call**, and its only job is naming the links — **structured outputs** (`output_config.format` with a JSON schema) give back title, author, URL and the newsletter's note, all quoted from the email rather than composed. Everything after that is code: the app resolves each link, scrapes the article, and assembles the entry. Nothing in the digest is generated, so the model can't invent text and isn't spending a minute a newsletter retyping what the scraper already has. Every URL it returns is checked against the email character for character, and one that isn't there is logged as a warning. API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s for the model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |

@@ -5,6 +5,7 @@ import { AuthPanel } from "./components/AuthPanel";
 import { PostList } from "./components/PostList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
+import { FilterEditorModal } from "./components/FilterEditorModal";
 import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
 import { OrganizePanel } from "./components/OrganizePanel";
@@ -13,6 +14,7 @@ import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
 import { clearProcessed, loadProcessed, markProcessed } from "./processed";
+import { FILTERS_KEY, activeFilters, filterLabel, loadFilters } from "./filters";
 import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
@@ -39,14 +41,13 @@ import {
   type DigestPost,
   type GeneratedOutput,
   type LayoutSettings,
+  type MailFilter,
   type Post,
 } from "./types";
 
 const SETTINGS_KEY = "subdigest.settings";
-const DOMAINS_KEY = "subdigest.domains";
 const AGENTS_KEY = "subdigest.agentConfigs";
 const ANTHROPIC_KEY = "subdigest.anthropicKey";
-const DEFAULT_DOMAINS = ["substack.com"];
 
 function loadJson<T>(key: string, fallback: T): T {
   try {
@@ -68,20 +69,6 @@ function loadSettings(): LayoutSettings {
   return DEFAULT_SETTINGS;
 }
 
-function loadDomains(): string[] {
-  try {
-    const raw = localStorage.getItem(DOMAINS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {
-    /* fall through */
-  }
-  return DEFAULT_DOMAINS;
-}
-
-
 export default function App() {
   const [account, setAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -94,7 +81,10 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [posts, setPosts] = useState<Post[]>([]);
   const [settings, setSettings] = useState<LayoutSettings>(loadSettings);
-  const [domains, setDomains] = useState<string[]>(loadDomains);
+  // What a scan looks for. The sidebar enables and disables them; the editor
+  // composes them.
+  const [filters, setFilters] = useState<MailFilter[]>(loadFilters);
+  const [showFilters, setShowFilters] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [agentConfigs, setAgentConfigs] = useState<Record<string, AgentConfig>>(() =>
     loadJson(AGENTS_KEY, {})
@@ -172,8 +162,8 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
-    localStorage.setItem(DOMAINS_KEY, JSON.stringify(domains));
-  }, [domains]);
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(filters));
+  }, [filters]);
 
   useEffect(() => {
     localStorage.setItem(AGENTS_KEY, JSON.stringify(agentConfigs));
@@ -262,17 +252,22 @@ export default function App() {
     return { after, before };
   }, [days, range]);
 
+  // Only the enabled filters, and only those with something to match on — an
+  // empty one would otherwise hand back the whole mailbox.
+  const scanFilters = useMemo(() => activeFilters(filters), [filters]);
+
   const scan = useCallback(async () => {
-    if (!scanWindow) return;
+    if (!scanWindow || scanFilters.length === 0) return;
     setError(null);
     setScanning(true);
     const label = (ms: number) => (ms > 0 ? new Date(ms).toLocaleString() : "any");
     logInfo(
       "gmail",
-      `Scanning ${domains.join(", ")} from ${label(scanWindow.after)} to ${label(scanWindow.before)}`
+      `Scanning with ${scanFilters.map(filterLabel).join(", ")} from ` +
+        `${label(scanWindow.after)} to ${label(scanWindow.before)}`
     );
     try {
-      const metas = await gmailSearch(scanWindow.after, scanWindow.before, domains);
+      const metas = await gmailSearch(scanWindow.after, scanWindow.before, scanFilters);
       const found = metas
         .map((m) => ({
           ...m,
@@ -288,7 +283,11 @@ export default function App() {
     } finally {
       setScanning(false);
     }
-  }, [scanWindow, domains, fail]);
+  }, [scanWindow, scanFilters, fail]);
+
+  const toggleFilter = useCallback((id: string, enabled: boolean) => {
+    setFilters((fs) => fs.map((f) => (f.id === id ? { ...f, enabled } : f)));
+  }, []);
 
   const togglePost = useCallback((id: string) => {
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, selected: !p.selected } : p)));
@@ -527,7 +526,7 @@ export default function App() {
               className="icon-btn"
               onClick={() => setShowSettings(true)}
               aria-label="Settings"
-              title="Domains, agent & settings"
+              title="Agent & settings"
             >
               <GearIcon />
             </button>
@@ -552,9 +551,12 @@ export default function App() {
                   rangeValid={scanWindow !== null}
                   scanning={scanning}
                   agentConfigs={agentConfigs}
+                  filters={filters}
                   processed={processedBefore}
                   onDaysChange={setDays}
                   onRangeChange={setRange}
+                  onToggleFilter={toggleFilter}
+                  onEditFilters={() => setShowFilters(true)}
                   onScan={scan}
                   onTogglePost={togglePost}
                   onSetPostsSelected={setPostsSelected}
@@ -666,10 +668,16 @@ export default function App() {
 
       {showLog && <LogPane onClose={() => setShowLog(false)} />}
 
+      {showFilters && (
+        <FilterEditorModal
+          filters={filters}
+          onChange={setFilters}
+          onClose={() => setShowFilters(false)}
+        />
+      )}
+
       {showSettings && (
         <SettingsModal
-          domains={domains}
-          onDomainsChange={setDomains}
           anthropicKey={anthropicKey}
           onAnthropicKeyChange={saveAnthropicKey}
           processedCount={processedCount}

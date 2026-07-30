@@ -180,6 +180,11 @@ body {
   box-shadow: 0 12px 40px rgba(30, 25, 15, 0.25);
 }
 
+/* The filter editor holds several criteria side by side; it needs the room. */
+.modal.wide {
+  max-width: 560px;
+}
+
 .modal-head {
   display: flex;
   align-items: center;
@@ -190,33 +195,6 @@ body {
 .modal-head h2 {
   font-size: 15px;
   margin: 0;
-}
-
-.domain-list {
-  list-style: none;
-  margin: 12px 0;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.domain-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.domain-list li:last-child {
-  border-bottom: none;
-}
-
-.domain-name {
-  font-size: 13px;
-  word-break: break-all;
 }
 
 .link.danger {
@@ -230,18 +208,18 @@ body {
   opacity: 0.5;
 }
 
-.domain-add {
+.chip-add {
   display: flex;
   gap: 8px;
   margin-top: 4px;
 }
 
-.domain-add input {
+.chip-add input {
   margin-top: 0;
   flex: 1;
 }
 
-.domain-add button {
+.chip-add button {
   flex: none;
 }
 
@@ -298,6 +276,138 @@ body {
   border: 1px solid #ecd9a8;
   border-radius: 6px;
   padding: 7px 9px;
+}
+
+/* ---- Filter editor ---- */
+
+.filter-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0 10px;
+}
+
+.filter-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: #fbfaf8;
+}
+
+.filter-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.filter-name {
+  margin-top: 0;
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  background: var(--panel);
+}
+
+label.check.inline {
+  display: inline-flex;
+  flex: none;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Four criteria per filter is a long column on its own, so they pair up. */
+.chip-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  margin-top: 10px;
+}
+
+/* Narrow windows (and the iPad in portrait) get them stacked instead. */
+@media (max-width: 620px) {
+  .chip-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chip-field {
+  min-width: 0;
+}
+
+.chip-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.chip-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.chip-hint {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 6px;
+  padding: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 4px 3px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+}
+
+.chip-x:hover {
+  background: #f1efe9;
+  color: var(--accent-dark);
+}
+
+.add-filter {
+  width: 100%;
 }
 
 .agent-instructions {
@@ -360,13 +470,25 @@ body {
     height: 40px;
   }
   .modal button,
-  .domain-add input,
+  .chip-add input,
+  .filter-name,
   .format-toggle button {
     min-height: 44px;
   }
   .link.danger {
     min-height: 44px;
     padding: 0 6px;
+  }
+  /* A chip's ✕ sits inside the pill, so it stays pill-sized. */
+  .chip-x {
+    width: 26px;
+    height: 26px;
+    min-height: 26px;
+  }
+  .filters-btn,
+  .filter-menu .menu-check,
+  .filter-menu .menu-item {
+    min-height: 36px;
   }
 }
 
@@ -529,6 +651,109 @@ button.link {
 }
 
 /* ---- Post list ---- */
+
+/* The Posts heading and the filters a scan will use, on one line. */
+.posts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.posts-head .col-title {
+  margin: 0;
+}
+
+.filters-anchor {
+  position: relative;
+  flex: none;
+}
+
+.filters-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.filters-btn:hover,
+.filters-btn.active {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+}
+
+.filters-count {
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.filter-menu {
+  position: absolute;
+  top: 28px;
+  right: 0;
+  z-index: 41;
+  width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(30, 25, 15, 0.18);
+  padding: 6px;
+}
+
+.filter-menu-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.filter-menu .menu-check {
+  align-items: flex-start;
+}
+
+.filter-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.filter-menu-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.filter-menu-summary {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-menu-warn {
+  display: block;
+  padding: 0 8px 4px 31px;
+  font-size: 11px;
+  color: #8a5a14;
+}
+
+.filter-menu-empty {
+  margin: 6px 8px;
+}
+
+.menu-item.edit-filters {
+  margin-top: 4px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+}
 
 .scan-row {
   display: flex;

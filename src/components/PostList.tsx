@@ -1,5 +1,13 @@
 import { useMemo, useRef, useState } from "react";
-import { CUSTOM_RANGE, type AgentConfig, type DateRange, type Post, type Publication } from "../types";
+import { activeFilters, filterIsEmpty, filterLabel, filterSummary } from "../filters";
+import {
+  CUSTOM_RANGE,
+  type AgentConfig,
+  type DateRange,
+  type MailFilter,
+  type Post,
+  type Publication,
+} from "../types";
 
 interface Props {
   posts: Post[];
@@ -8,10 +16,14 @@ interface Props {
   rangeValid: boolean;
   scanning: boolean;
   agentConfigs: Record<string, AgentConfig>;
+  /** Every saved filter; a scan uses the enabled ones. */
+  filters: MailFilter[];
   /** Posts read in an earlier session — shown at half strength, nothing more. */
   processed: ReadonlySet<string>;
   onDaysChange: (days: number) => void;
   onRangeChange: (range: DateRange) => void;
+  onToggleFilter: (id: string, enabled: boolean) => void;
+  onEditFilters: () => void;
   onScan: () => void;
   onTogglePost: (id: string) => void;
   onSetPostsSelected: (ids: string[], selected: boolean) => void;
@@ -44,9 +56,12 @@ export function PostList({
   rangeValid,
   scanning,
   agentConfigs,
+  filters,
   processed,
   onDaysChange,
   onRangeChange,
+  onToggleFilter,
+  onEditFilters,
   onScan,
   onTogglePost,
   onSetPostsSelected,
@@ -55,6 +70,7 @@ export function PostList({
   onOpenAgentOptions,
 }: Props) {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   // The post a shift-click extends the selection from: the last one clicked.
   const anchorId = useRef<string | null>(null);
   // A checkbox's change event carries no modifier keys, and React derives that
@@ -93,10 +109,69 @@ export function PostList({
   };
 
   const usingRange = days === CUSTOM_RANGE;
+  // What a scan would actually use: enabled, and with something to match on.
+  const willScanWith = useMemo(() => activeFilters(filters), [filters]);
 
   return (
     <section className="panel posts">
-      <h2 className="col-title">Posts</h2>
+      <div className="posts-head">
+        <h2 className="col-title">Posts</h2>
+        <div className="filters-anchor">
+          <button
+            className={`filters-btn${filtersOpen ? " active" : ""}`}
+            onClick={() => setFiltersOpen((v) => !v)}
+            aria-expanded={filtersOpen}
+            title="Which filters a scan uses"
+          >
+            Filters
+            <span className="filters-count">
+              {willScanWith.length}/{filters.length}
+            </span>
+          </button>
+
+          {filtersOpen && (
+            <>
+              <div className="menu-scrim" onClick={() => setFiltersOpen(false)} />
+              <div className="filter-menu" role="menu">
+                {filters.length === 0 ? (
+                  <p className="hint filter-menu-empty">No filters yet.</p>
+                ) : (
+                  <ul className="filter-menu-list">
+                    {filters.map((f) => (
+                      <li key={f.id}>
+                        <label className="menu-check">
+                          <input
+                            type="checkbox"
+                            checked={f.enabled}
+                            onChange={(e) => onToggleFilter(f.id, e.target.checked)}
+                          />
+                          <span className="filter-menu-text">
+                            <span className="filter-menu-name">{filterLabel(f)}</span>
+                            <span className="filter-menu-summary">{filterSummary(f)}</span>
+                          </span>
+                        </label>
+                        {f.enabled && filterIsEmpty(f) && (
+                          <span className="filter-menu-warn">nothing to match on</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <button
+                  className="menu-item edit-filters"
+                  onClick={() => {
+                    setFiltersOpen(false);
+                    onEditFilters();
+                  }}
+                >
+                  Edit Filters…
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
       <div className="scan-row">
         <select value={days} onChange={(e) => onDaysChange(Number(e.target.value))}>
           {TIMEFRAMES.map((t) => (
@@ -105,10 +180,25 @@ export function PostList({
             </option>
           ))}
         </select>
-        <button className="secondary" disabled={scanning || !rangeValid} onClick={onScan}>
+        <button
+          className="secondary"
+          disabled={scanning || !rangeValid || willScanWith.length === 0}
+          onClick={onScan}
+          title={
+            willScanWith.length === 0 ? "Enable a filter to scan with" : "Search your whole mailbox"
+          }
+        >
           {scanning ? "Scanning…" : "Scan Mail"}
         </button>
       </div>
+
+      {willScanWith.length === 0 && (
+        <p className="hint warn">
+          {filters.length === 0
+            ? "No filters yet — add one under Filters to scan."
+            : "No filter is enabled — pick one under Filters to scan."}
+        </p>
+      )}
 
       {usingRange && (
         <div className="range-row">
@@ -137,8 +227,10 @@ export function PostList({
         <p className="hint warn">Pick a start and end date (start first) to scan a range.</p>
       )}
 
-      {posts.length === 0 && !scanning && (
-        <p className="hint">Scan your mail to discover Substack posts (archived included).</p>
+      {posts.length === 0 && !scanning && willScanWith.length > 0 && (
+        <p className="hint">
+          Scan your mail for anything your filters match (archived mail included).
+        </p>
       )}
 
       {posts.length > 0 && (

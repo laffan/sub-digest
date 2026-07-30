@@ -6,7 +6,7 @@ import {
   OAUTH_IOS_REDIRECT_SCHEME,
   OAUTH_REDIRECT_PORT,
 } from "./config";
-import type { PostMeta } from "./types";
+import type { MailFilter, PostMeta } from "./types";
 
 /**
  * Starts the OAuth flow in the system browser; resolves with the account email.
@@ -38,15 +38,16 @@ export function gmailDisconnect(): Promise<void> {
 }
 
 /**
- * Lists emails from `domains` between `afterMs` and `beforeMs` (epoch millis).
- * Either bound may be 0, meaning open-ended on that side.
+ * Lists emails matching any of `filters` between `afterMs` and `beforeMs`
+ * (epoch millis). Either bound may be 0, meaning open-ended on that side.
+ * The backend turns the filters into one Gmail query.
  */
 export function gmailSearch(
   afterMs: number,
   beforeMs: number,
-  domains: string[]
+  filters: MailFilter[]
 ): Promise<PostMeta[]> {
-  return invoke<PostMeta[]>("gmail_search", { afterMs, beforeMs, domains });
+  return invoke<PostMeta[]>("gmail_search", { afterMs, beforeMs, filters });
 }
 
 /** Returns the HTML body of a message (plain text is wrapped by the backend). */

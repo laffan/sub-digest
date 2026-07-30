@@ -2,8 +2,6 @@ import { useState } from "react";
 import { AGENT_MODEL_LABEL, anthropicTest } from "../anthropic";
 
 interface Props {
-  domains: string[];
-  onDomainsChange: (domains: string[]) => void;
   anthropicKey: string;
   onAnthropicKeyChange: (key: string) => void;
   /** How many posts are remembered as already processed. */
@@ -12,41 +10,17 @@ interface Props {
   onClose: () => void;
 }
 
-/** Reduces "@Substack.com", "https://ghost.io/x" etc. to a bare "substack.com". */
-function normalizeDomain(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/^@/, "")
-    .replace(/^https?:\/\//, "")
-    .replace(/\/.*$/, "")
-    .replace(/\s+/g, "");
-}
-
 type TestState = { status: "idle" | "testing" | "ok" | "error"; message?: string };
 
 export function SettingsModal({
-  domains,
-  onDomainsChange,
   anthropicKey,
   onAnthropicKeyChange,
   processedCount,
   onForgetProcessed,
   onClose,
 }: Props) {
-  const [input, setInput] = useState("");
   const [keyDraft, setKeyDraft] = useState(anthropicKey);
   const [test, setTest] = useState<TestState>({ status: "idle" });
-
-  const candidate = normalizeDomain(input);
-  const duplicate = candidate.length > 0 && domains.includes(candidate);
-
-  const addDomain = () => {
-    if (!candidate || duplicate) return;
-    onDomainsChange([...domains, candidate]);
-    setInput("");
-  };
-  const removeDomain = (d: string) => onDomainsChange(domains.filter((x) => x !== d));
 
   const saveKey = (key: string) => {
     setKeyDraft(key);
@@ -79,50 +53,6 @@ export function SettingsModal({
             ✕
           </button>
         </div>
-
-        <h3 className="modal-section">Sender domains</h3>
-        <p className="hint">
-          Scanning matches email from these domains — for example <code>substack.com</code>,{" "}
-          <code>ghost.io</code>, <code>beehiiv.com</code>, or a specific sender like{" "}
-          <code>news@example.com</code>.
-        </p>
-        <ul className="domain-list">
-          {domains.map((d) => (
-            <li key={d}>
-              <span className="domain-name">{d}</span>
-              <button
-                className="link danger"
-                onClick={() => removeDomain(d)}
-                disabled={domains.length <= 1}
-                aria-label={`Remove ${d}`}
-              >
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-        <form
-          className="domain-add"
-          onSubmit={(e) => {
-            e.preventDefault();
-            addDomain();
-          }}
-        >
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="add a domain…"
-            autoCapitalize="none"
-            autoCorrect="off"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <button className="secondary" type="submit" disabled={!candidate || duplicate}>
-            Add
-          </button>
-        </form>
-        {duplicate && <p className="hint">Already added.</p>}
 
         <h3 className="modal-section">AI agent (Anthropic)</h3>
         <p className="hint">

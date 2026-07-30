@@ -98,6 +98,23 @@ pub struct StoredAuth {
     expires_at: u64,
 }
 
+/// One of the UI's mail filters. Values within a field are alternatives; every
+/// field that has any is a condition the message has to meet.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailFilter {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    domains: Vec<String>,
+    #[serde(default)]
+    senders: Vec<String>,
+    #[serde(default)]
+    subjects: Vec<String>,
+    #[serde(default)]
+    terms: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostMeta {
@@ -361,42 +378,116 @@ pub async fn gmail_disconnect(app: AppHandle, state: State<'_, AuthState>) -> Re
     Ok(())
 }
 
-#[tauri::command]
-pub async fn gmail_search(
-    app: AppHandle,
-    state: State<'_, AuthState>,
-    after_ms: i64,
-    before_ms: i64,
-    domains: Vec<String>,
-) -> Result<Vec<PostMeta>, String> {
-    let token = access_token(&app, &state).await?;
+/// A bare `from:` operand — a domain or a whole address. Anything a query would
+/// have to quote isn't one of those, so it's dropped rather than escaped.
+fn clean_address(raw: &str) -> Option<String> {
+    let addr = raw.trim().trim_start_matches('@').to_lowercase();
+    let unusable = |c: char| c.is_whitespace() || c.is_control() || "\"()".contains(c);
+    (!addr.is_empty() && !addr.contains(unusable)).then_some(addr)
+}
 
-    // Sanitize to bare domains/addresses and OR them together.
-    let cleaned: Vec<String> = domains
-        .iter()
-        .map(|d| d.trim().trim_start_matches('@').to_lowercase())
-        .filter(|d| !d.is_empty() && !d.contains(' '))
-        .collect();
-    if cleaned.is_empty() {
-        return Err("no sender domains configured".to_string());
+/// A subject slice or search term as a quoted phrase. The quotes are what
+/// delimits it, so one inside the text would end it early: they come out.
+fn quote_phrase(raw: &str) -> Option<String> {
+    let words: Vec<&str> = raw.split(|c: char| c.is_whitespace() || c.is_control()).collect();
+    let phrase = words
+        .into_iter()
+        .map(|w| w.replace('"', ""))
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!phrase.is_empty()).then(|| format!("\"{phrase}\""))
+}
+
+/// The values of one criterion as a single operand: `a` alone, or `(a OR b)`.
+fn any_of(values: Vec<String>) -> Option<String> {
+    match values.len() {
+        0 => None,
+        1 => values.into_iter().next(),
+        _ => Some(format!("({})", values.join(" OR "))),
     }
-    let from = if cleaned.len() == 1 {
-        format!("from:{}", cleaned[0])
-    } else {
-        format!("from:({})", cleaned.join(" OR "))
-    };
+}
 
-    // `messages.list` with `q` searches all mail (archived included), minus
-    // spam/trash. A non-positive bound means "open ended" on that side: no
-    // `after_ms` is All time, no `before_ms` is up to now.
-    let mut query = from;
+/// One filter as a query fragment: the criteria it sets, ANDed together.
+fn filter_clause(f: &MailFilter) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    // A domain and a whole address are the same test to Gmail, and no message
+    // is from two senders at once — so they're alternatives, not conditions.
+    let from: Vec<String> = f
+        .domains
+        .iter()
+        .chain(f.senders.iter())
+        .filter_map(|s| clean_address(s))
+        .collect();
+    if let Some(operand) = any_of(from) {
+        parts.push(format!("from:{operand}"));
+    }
+
+    let subjects: Vec<String> = f.subjects.iter().filter_map(|s| quote_phrase(s)).collect();
+    if let Some(operand) = any_of(subjects) {
+        parts.push(format!("subject:{operand}"));
+    }
+
+    // A bare phrase searches the whole message — headers, body and all.
+    let terms: Vec<String> = f.terms.iter().filter_map(|s| quote_phrase(s)).collect();
+    if let Some(operand) = any_of(terms) {
+        parts.push(operand);
+    }
+
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// The whole scan as one Gmail query: any enabled filter is a way in, and the
+/// date window applies to all of them — hence the parentheses around the OR.
+///
+/// A non-positive bound means "open ended" on that side: no `after_ms` is All
+/// time, no `before_ms` is up to now.
+fn build_query(filters: &[MailFilter], after_ms: i64, before_ms: i64) -> Result<String, String> {
+    let clauses: Vec<String> = filters.iter().filter_map(filter_clause).collect();
+    let mut query = match clauses.len() {
+        0 => return Err("no filters to scan with — add one under Filters".to_string()),
+        1 => clauses.into_iter().next().unwrap(),
+        _ => format!(
+            "({})",
+            clauses
+                .iter()
+                .map(|c| format!("({c})"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        ),
+    };
     if after_ms > 0 {
         query.push_str(&format!(" after:{}", after_ms / 1000));
     }
     if before_ms > 0 {
         query.push_str(&format!(" before:{}", before_ms / 1000));
     }
+    Ok(query)
+}
 
+#[tauri::command]
+pub async fn gmail_search(
+    app: AppHandle,
+    state: State<'_, AuthState>,
+    after_ms: i64,
+    before_ms: i64,
+    filters: Vec<MailFilter>,
+) -> Result<Vec<PostMeta>, String> {
+    let token = access_token(&app, &state).await?;
+
+    // `messages.list` with `q` searches all mail (archived included), minus
+    // spam/trash.
+    let query = build_query(&filters, after_ms, before_ms)?;
+
+    let names: Vec<&str> = filters
+        .iter()
+        .map(|f| f.name.trim())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if !names.is_empty() {
+        crate::log::info(&app, "gmail", format!("Filters: {}", names.join(", ")));
+    }
     crate::log::info(&app, "gmail", format!("Query: {query}"));
 
     // Page through matching message ids
@@ -536,4 +627,127 @@ pub async fn save_file(path: String, bytes_b64: String) -> Result<(), String> {
         .decode(bytes_b64)
         .map_err(|e| format!("bad document payload: {e}"))?;
     std::fs::write(&path, bytes).map_err(|e| format!("could not write {path}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filter(name: &str) -> MailFilter {
+        MailFilter {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn one_domain_is_a_bare_from() {
+        let f = MailFilter {
+            domains: strings(&["substack.com"]),
+            ..filter("Substack")
+        };
+        assert_eq!(build_query(&[f], 0, 0).unwrap(), "from:substack.com");
+    }
+
+    #[test]
+    fn domains_and_senders_are_alternatives() {
+        let f = MailFilter {
+            domains: strings(&["@Substack.com", "ghost.io"]),
+            senders: strings(&["News@Example.com"]),
+            ..filter("Newsletters")
+        };
+        assert_eq!(
+            build_query(&[f], 0, 0).unwrap(),
+            "from:(substack.com OR ghost.io OR news@example.com)"
+        );
+    }
+
+    #[test]
+    fn criteria_of_different_kinds_all_have_to_hold() {
+        let f = MailFilter {
+            domains: strings(&["example.com"]),
+            subjects: strings(&["Weekly Dispatch"]),
+            terms: strings(&["unsubscribe"]),
+            ..filter("Dispatch")
+        };
+        assert_eq!(
+            build_query(&[f], 0, 0).unwrap(),
+            "from:example.com subject:\"Weekly Dispatch\" \"unsubscribe\""
+        );
+    }
+
+    #[test]
+    fn subject_slices_are_alternatives_within_the_filter() {
+        let f = MailFilter {
+            subjects: strings(&["Weekly Digest", "Monthly Digest"]),
+            ..filter("Digests")
+        };
+        assert_eq!(
+            build_query(&[f], 0, 0).unwrap(),
+            "subject:(\"Weekly Digest\" OR \"Monthly Digest\")"
+        );
+    }
+
+    #[test]
+    fn several_filters_are_ored_inside_the_date_window() {
+        let a = MailFilter {
+            domains: strings(&["substack.com"]),
+            ..filter("Substack")
+        };
+        let b = MailFilter {
+            subjects: strings(&["Issue #"]),
+            ..filter("Issues")
+        };
+        assert_eq!(
+            build_query(&[a, b], 1_700_000_000_000, 1_700_086_400_000).unwrap(),
+            "((from:substack.com) OR (subject:\"Issue #\")) after:1700000000 before:1700086400"
+        );
+    }
+
+    #[test]
+    fn quotes_and_line_breaks_in_a_phrase_cant_break_out_of_it() {
+        let f = MailFilter {
+            subjects: strings(&["  a \"quoted\"\nslice  "]),
+            ..filter("Odd")
+        };
+        assert_eq!(
+            build_query(&[f], 0, 0).unwrap(),
+            "subject:\"a quoted slice\""
+        );
+    }
+
+    #[test]
+    fn unusable_addresses_are_dropped_rather_than_escaped() {
+        let f = MailFilter {
+            domains: strings(&["", "  ", "two words.com", "sub stack\")"]),
+            senders: strings(&["news@example.com"]),
+            ..filter("Messy")
+        };
+        assert_eq!(build_query(&[f], 0, 0).unwrap(), "from:news@example.com");
+    }
+
+    #[test]
+    fn a_filter_with_no_usable_criteria_never_scans() {
+        assert!(build_query(&[], 0, 0).is_err());
+        assert!(build_query(&[filter("Empty")], 0, 0).is_err());
+        let blank = MailFilter {
+            subjects: strings(&["   "]),
+            ..filter("Blank")
+        };
+        assert!(build_query(&[blank], 0, 0).is_err());
+    }
+
+    #[test]
+    fn an_unusable_filter_doesnt_take_the_scan_down_with_it() {
+        let good = MailFilter {
+            domains: strings(&["substack.com"]),
+            ..filter("Substack")
+        };
+        let bad = filter("Empty");
+        assert_eq!(build_query(&[good, bad], 0, 0).unwrap(), "from:substack.com");
+    }
 }

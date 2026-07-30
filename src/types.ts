@@ -28,6 +28,34 @@ export interface DateRange {
   end: string;
 }
 
+/**
+ * One saved way of finding newsletters. A filter can be a sender domain, a
+ * whole address, a slice of subject line, a search term, or any combination:
+ * every kind of criterion it sets has to hold, and within one kind any single
+ * value will do. So domains `substack.com` plus the subject slice `Weekly`
+ * finds Substack mail whose subject carries "Weekly", nothing else.
+ *
+ * Scanning ORs the enabled filters together, so each one is its own way in.
+ */
+export interface MailFilter {
+  /** Stable across edits, so the sidebar's checkboxes track the right filter. */
+  id: string;
+  /** What the user calls it; falls back to its first criterion when blank. */
+  name: string;
+  enabled: boolean;
+  /** Sender domains, e.g. `substack.com`. */
+  domains: string[];
+  /** Whole sender addresses, e.g. `news@example.com`. */
+  senders: string[];
+  /** Text the subject line has to contain. */
+  subjects: string[];
+  /** Free search terms, matched anywhere in the message. */
+  terms: string[];
+}
+
+/** The criterion lists on a filter — everything but its id, name and state. */
+export type FilterField = "domains" | "senders" | "subjects" | "terms";
+
 /** Per-publication agent configuration, keyed by publication name. */
 export interface AgentConfig {
   useAgent: boolean;
