@@ -269,6 +269,50 @@ whole app there before wiring the iOS client for on-device/TestFlight builds.
 > `Info.plist` scheme registration and on-device redirect can only be verified on
 > a Mac + iPad, since Xcode isn't available in this build environment.
 
+## Releasing
+
+Two GitHub Actions workflows live in `.github/workflows`:
+
+- **CI** (`ci.yml`) — on every push to `main` and every pull request, builds the
+  frontend (`tsc` + Vite) and runs `cargo check` on macOS.
+- **Release** (`release.yml`) — builds a **universal** macOS bundle (Apple
+  silicon + Intel) and publishes it as a GitHub Release with the `.dmg`
+  attached.
+
+To cut a release, go to **Actions → Release → Run workflow**. Leave *version*
+blank to use the number already in `tauri.conf.json`, or type one (`0.2.0`) to
+build that instead. It publishes a **draft** by default, so you can read it over
+before it's public — untick *draft* to publish straight away. Pushing a tag like
+`v0.2.0` runs the same build.
+
+The version lives in three files. Keep them in step with:
+
+```sh
+node scripts/set-version.mjs 0.2.0   # package.json, tauri.conf.json, Cargo.toml
+node scripts/set-version.mjs         # prints the current version
+```
+
+The workflow reads the `.env` values from **repository secrets** — set
+`VITE_GMAIL_CLIENT_ID`, `VITE_GMAIL_CLIENT_SECRET` and
+`VITE_OAUTH_REDIRECT_PORT` (plus the two `VITE_GMAIL_IOS_*` ones if you're
+using them) under *Settings → Secrets and variables → Actions*. Vite bakes them
+into the bundle at build time exactly as a local `.env` would.
+
+Two things worth knowing about what comes out:
+
+- **The build isn't signed or notarised.** macOS quarantines it, so a first run
+  needs `xattr -cr "/Applications/Sub Digest.app"`. Signing it properly means a
+  paid Apple Developer account and adding `APPLE_CERTIFICATE`,
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+  `APPLE_PASSWORD` and `APPLE_TEAM_ID` as secrets — `tauri-action` picks them up
+  with no change to the workflow.
+- **Anyone who downloads it has your OAuth client secret**, since it's compiled
+  into the app. That's inherent to installed-app OAuth — Google treats desktop
+  client secrets as non-confidential, and the loopback redirect is what actually
+  protects the flow — but it does mean the quota and consent screen are yours.
+  There's no iOS job here: an iOS build needs signing certificates and a
+  provisioning profile, which is a separate setup.
+
 ## How it's built
 
 | Piece | Where | Notes |

@@ -1,0 +1,101 @@
+name: Release
+
+# Builds Sub Digest for macOS (one universal binary, Apple silicon + Intel)
+# and publishes it as a downloadable GitHub Release.
+#
+# Two ways in:
+#   * Actions -> Release -> "Run workflow" (optionally naming a version)
+#   * pushing a tag like v0.2.0
+#
+# The Gmail OAuth credentials come from repository secrets and are baked into
+# the bundle by Vite at build time, exactly as a local `.env` would be.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0. Blank uses the version already in tauri.conf.json."
+        required: false
+        type: string
+      draft:
+        description: "Publish as a draft release (review before it goes public)"
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag, the release name and the version inside the .app all come from
+      # tauri.conf.json, so settle on one number first and write it everywhere.
+      - name: Resolve version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="$(node scripts/set-version.mjs)"
+          fi
+          node scripts/set-version.mjs "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Read by Vite through `npm run build`, which Tauri runs for us.
+          VITE_GMAIL_CLIENT_ID: ${{ secrets.VITE_GMAIL_CLIENT_ID }}
+          VITE_GMAIL_CLIENT_SECRET: ${{ secrets.VITE_GMAIL_CLIENT_SECRET }}
+          VITE_OAUTH_REDIRECT_PORT: ${{ secrets.VITE_OAUTH_REDIRECT_PORT }}
+          VITE_GMAIL_IOS_CLIENT_ID: ${{ secrets.VITE_GMAIL_IOS_CLIENT_ID }}
+          VITE_GMAIL_IOS_REDIRECT_SCHEME: ${{ secrets.VITE_GMAIL_IOS_REDIRECT_SCHEME }}
+        with:
+          args: --target universal-apple-darwin
+          tagName: v${{ steps.version.outputs.version }}
+          releaseName: Sub Digest v${{ steps.version.outputs.version }}
+          # `inputs.draft` is unset on a tag push, where a draft is the safer default.
+          releaseDraft: ${{ github.event_name != 'workflow_dispatch' || inputs.draft }}
+          prerelease: false
+          releaseBody: |
+            Download the `.dmg` below — one universal build for both Apple silicon and Intel Macs.
+
+            The app isn't signed with an Apple Developer certificate, so macOS
+            will refuse it the first time. Open it once with:
+
+            ```
+            xattr -cr "/Applications/Sub Digest.app"
+            ```
+
+            after dragging it to Applications.

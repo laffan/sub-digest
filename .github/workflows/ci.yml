@@ -1,0 +1,43 @@
+name: CI
+
+# Type-checks the frontend and compiles the Rust side on every push and pull
+# request, so a broken main is caught before anyone tries to cut a release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macOS is the app's target, so it's also where it gets checked.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      # tsc + vite. No credentials here — config.ts tolerates empty values, and
+      # a CI build is never shipped.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
