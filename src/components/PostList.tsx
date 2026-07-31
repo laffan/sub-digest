@@ -2,7 +2,6 @@ import { useMemo, useRef, useState } from "react";
 import { activeFilters, filterIsEmpty, filterLabel, filterSummary } from "../filters";
 import {
   CUSTOM_RANGE,
-  type AgentConfig,
   type DateRange,
   type MailFilter,
   type Post,
@@ -15,7 +14,8 @@ interface Props {
   range: DateRange;
   rangeValid: boolean;
   scanning: boolean;
-  agentConfigs: Record<string, AgentConfig>;
+  /** Ids of posts the agent will read, from the filter that found each. */
+  agentPosts: ReadonlySet<string>;
   /** Every saved filter; a scan uses the enabled ones. */
   filters: MailFilter[];
   /** Posts read in an earlier session — shown at half strength, nothing more. */
@@ -28,8 +28,6 @@ interface Props {
   onTogglePost: (id: string) => void;
   onSetPostsSelected: (ids: string[], selected: boolean) => void;
   onTogglePublication: (name: string, selected: boolean) => void;
-  onToggleAgent: (name: string, useAgent: boolean) => void;
-  onOpenAgentOptions: (name: string) => void;
 }
 
 // `days: 0` means no lower bound — search the entire archive.
@@ -55,7 +53,7 @@ export function PostList({
   range,
   rangeValid,
   scanning,
-  agentConfigs,
+  agentPosts,
   filters,
   processed,
   onDaysChange,
@@ -66,10 +64,7 @@ export function PostList({
   onTogglePost,
   onSetPostsSelected,
   onTogglePublication,
-  onToggleAgent,
-  onOpenAgentOptions,
 }: Props) {
-  const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   // The post a shift-click extends the selection from: the last one clicked.
   const anchorId = useRef<string | null>(null);
@@ -146,7 +141,14 @@ export function PostList({
                             onChange={(e) => onToggleFilter(f.id, e.target.checked)}
                           />
                           <span className="filter-menu-text">
-                            <span className="filter-menu-name">{filterLabel(f)}</span>
+                            <span className="filter-menu-name">
+                              {filterLabel(f)}
+                              {f.useAgent && (
+                                <span className="agent-tag" title="Read by the AI agent">
+                                  agent
+                                </span>
+                              )}
+                            </span>
                             <span className="filter-menu-summary">{filterSummary(f)}</span>
                           </span>
                         </label>
@@ -248,9 +250,8 @@ export function PostList({
         {publications.map((pub) => {
           const all = pub.posts.every((p) => p.selected);
           const some = pub.posts.some((p) => p.selected);
-          const agent = agentConfigs[pub.name];
-          const useAgent = agent?.useAgent ?? false;
-          const menuOpen = openMenu === pub.name;
+          // How many of these the agent will read, rather than the parser.
+          const agentic = pub.posts.filter((p) => agentPosts.has(p.id)).length;
           return (
             <div className="pub" key={pub.name}>
               <div className="pub-header">
@@ -265,42 +266,19 @@ export function PostList({
                   />
                   <span className="pub-name">{pub.name}</span>
                 </label>
-                <span className="pub-count">{pub.posts.length}</span>
-                <button
-                  className={`pub-menu-btn${useAgent ? " active" : ""}`}
-                  aria-label={`Agent menu for ${pub.name}`}
-                  aria-expanded={menuOpen}
-                  title={useAgent ? "Agent enabled" : "Agent options"}
-                  onClick={() => setOpenMenu(menuOpen ? null : pub.name)}
-                >
-                  <CaretIcon />
-                </button>
-
-                {menuOpen && (
-                  <>
-                    <div className="menu-scrim" onClick={() => setOpenMenu(null)} />
-                    <div className="pub-menu" role="menu">
-                      <label className="menu-check">
-                        <input
-                          type="checkbox"
-                          checked={useAgent}
-                          onChange={(e) => onToggleAgent(pub.name, e.target.checked)}
-                        />
-                        Use Agent
-                      </label>
-                      <button
-                        className="menu-item"
-                        disabled={!useAgent}
-                        onClick={() => {
-                          setOpenMenu(null);
-                          onOpenAgentOptions(pub.name);
-                        }}
-                      >
-                        Agent options…
-                      </button>
-                    </div>
-                  </>
+                {agentic > 0 && (
+                  <span
+                    className="agent-tag"
+                    title={
+                      agentic === pub.posts.length
+                        ? "Read by the AI agent"
+                        : `${agentic} of ${pub.posts.length} read by the AI agent`
+                    }
+                  >
+                    agent{agentic < pub.posts.length ? ` ${agentic}` : ""}
+                  </span>
                 )}
+                <span className="pub-count">{pub.posts.length}</span>
               </div>
               <ul>
                 {pub.posts.map((p) => (
@@ -347,13 +325,5 @@ export function PostList({
         })}
       </div>
     </section>
-  );
-}
-
-function CaretIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }

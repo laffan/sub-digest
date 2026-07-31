@@ -5,6 +5,7 @@ use base64::Engine;
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -103,6 +104,10 @@ pub struct StoredAuth {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MailFilter {
+    /// Echoed back on every message this filter found, so the UI knows which
+    /// filter is responsible for a post — and hence how to read it.
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -122,6 +127,8 @@ pub struct PostMeta {
     from: String,
     subject: String,
     date_ms: i64,
+    /// The filters that found it, in the order they were configured.
+    filter_ids: Vec<String>,
 }
 
 fn http() -> &'static reqwest::Client {
@@ -378,11 +385,16 @@ pub async fn gmail_disconnect(app: AppHandle, state: State<'_, AuthState>) -> Re
     Ok(())
 }
 
-/// A bare `from:` operand — a domain or a whole address. Anything a query would
-/// have to quote isn't one of those, so it's dropped rather than escaped.
-fn clean_address(raw: &str) -> Option<String> {
-    let addr = raw.trim().trim_start_matches('@').to_lowercase();
-    let unusable = |c: char| c.is_whitespace() || c.is_control() || "\"()".contains(c);
+/// A `from:` operand — a domain, a whole address, or the name on the From
+/// header, which Gmail matches too. A name has spaces, so it goes in as a
+/// quoted phrase; an address is bare and lowercased.
+fn clean_sender(raw: &str) -> Option<String> {
+    let value = raw.trim().trim_start_matches('@');
+    if value.contains(char::is_whitespace) {
+        return quote_phrase(value);
+    }
+    let addr = value.to_lowercase();
+    let unusable = |c: char| c.is_control() || "\"()".contains(c);
     (!addr.is_empty() && !addr.contains(unusable)).then_some(addr)
 }
 
@@ -418,7 +430,7 @@ fn filter_clause(f: &MailFilter) -> Option<String> {
         .domains
         .iter()
         .chain(f.senders.iter())
-        .filter_map(|s| clean_address(s))
+        .filter_map(|s| clean_sender(s))
         .collect();
     if let Some(operand) = any_of(from) {
         parts.push(format!("from:{operand}"));
@@ -438,70 +450,39 @@ fn filter_clause(f: &MailFilter) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// The whole scan as one Gmail query: any enabled filter is a way in, and the
-/// date window applies to all of them — hence the parentheses around the OR.
+/// One filter's whole query: its criteria, inside the scan's date window. None
+/// when the filter has nothing usable to match on.
 ///
 /// A non-positive bound means "open ended" on that side: no `after_ms` is All
 /// time, no `before_ms` is up to now.
-fn build_query(filters: &[MailFilter], after_ms: i64, before_ms: i64) -> Result<String, String> {
-    let clauses: Vec<String> = filters.iter().filter_map(filter_clause).collect();
-    let mut query = match clauses.len() {
-        0 => return Err("no filters to scan with — add one under Filters".to_string()),
-        1 => clauses.into_iter().next().unwrap(),
-        _ => format!(
-            "({})",
-            clauses
-                .iter()
-                .map(|c| format!("({c})"))
-                .collect::<Vec<_>>()
-                .join(" OR ")
-        ),
-    };
+///
+/// Each filter is its own query rather than one big OR, because a message has
+/// to come back knowing which filter found it — and a search term matches the
+/// body, so that can't be worked out from the headers afterwards.
+fn filter_query(f: &MailFilter, after_ms: i64, before_ms: i64) -> Option<String> {
+    let mut query = filter_clause(f)?;
     if after_ms > 0 {
         query.push_str(&format!(" after:{}", after_ms / 1000));
     }
     if before_ms > 0 {
         query.push_str(&format!(" before:{}", before_ms / 1000));
     }
-    Ok(query)
+    Some(query)
 }
 
-#[tauri::command]
-pub async fn gmail_search(
-    app: AppHandle,
-    state: State<'_, AuthState>,
-    after_ms: i64,
-    before_ms: i64,
-    filters: Vec<MailFilter>,
-) -> Result<Vec<PostMeta>, String> {
-    let token = access_token(&app, &state).await?;
-
-    // `messages.list` with `q` searches all mail (archived included), minus
-    // spam/trash.
-    let query = build_query(&filters, after_ms, before_ms)?;
-
-    let names: Vec<&str> = filters
-        .iter()
-        .map(|f| f.name.trim())
-        .filter(|n| !n.is_empty())
-        .collect();
-    if !names.is_empty() {
-        crate::log::info(&app, "gmail", format!("Filters: {}", names.join(", ")));
-    }
-    crate::log::info(&app, "gmail", format!("Query: {query}"));
-
-    // Page through matching message ids
+/// Pages through `messages.list`, collecting matching message ids.
+async fn list_message_ids(token: &str, query: &str) -> Result<Vec<String>, String> {
     let mut ids: Vec<String> = Vec::new();
     let mut page_token = String::new();
     loop {
         let mut url = url::Url::parse(&format!("{GMAIL}/messages")).unwrap();
         url.query_pairs_mut()
-            .append_pair("q", &query)
+            .append_pair("q", query)
             .append_pair("maxResults", "100");
         if !page_token.is_empty() {
             url.query_pairs_mut().append_pair("pageToken", &page_token);
         }
-        let page = api_get(&token, url.as_str()).await?;
+        let page = api_get(token, url.as_str()).await?;
         if let Some(messages) = page["messages"].as_array() {
             ids.extend(
                 messages
@@ -515,10 +496,63 @@ pub async fn gmail_search(
         }
     }
     ids.truncate(MAX_MESSAGES);
+    Ok(ids)
+}
+
+#[tauri::command]
+pub async fn gmail_search(
+    app: AppHandle,
+    state: State<'_, AuthState>,
+    after_ms: i64,
+    before_ms: i64,
+    filters: Vec<MailFilter>,
+) -> Result<Vec<PostMeta>, String> {
+    let token = access_token(&app, &state).await?;
+
+    // One query per filter. `messages.list` with `q` searches all mail
+    // (archived included), minus spam/trash.
+    let queries: Vec<(&MailFilter, String)> = filters
+        .iter()
+        .filter_map(|f| filter_query(f, after_ms, before_ms).map(|q| (f, q)))
+        .collect();
+    if queries.is_empty() {
+        return Err("no filters to scan with — add one under Filters".to_string());
+    }
+
+    // Which filters found each message, and the order they were first seen in.
+    // A message several filters match is fetched once and carries all of them.
+    let mut found: HashMap<String, Vec<String>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (filter, query) in &queries {
+        let label = match filter.name.trim() {
+            "" => "Filter",
+            name => name,
+        };
+        crate::log::info(&app, "gmail", format!("{label}: {query}"));
+        let ids = list_message_ids(&token, query).await?;
+        crate::log::info(
+            &app,
+            "gmail",
+            format!(
+                "{label}: {} message{}",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            ),
+        );
+        for id in ids {
+            let hits = found.entry(id.clone()).or_default();
+            if hits.is_empty() {
+                order.push(id);
+            }
+            hits.push(filter.id.clone());
+        }
+    }
+    order.truncate(MAX_MESSAGES);
 
     // Fetch headers for each id with bounded concurrency
-    let metas: Vec<Result<PostMeta, String>> = stream::iter(ids.into_iter().map(|id| {
+    let metas: Vec<Result<PostMeta, String>> = stream::iter(order.into_iter().map(|id| {
         let token = token.clone();
+        let filter_ids = found.remove(&id).unwrap_or_default();
         async move {
             let url = format!(
                 "{GMAIL}/messages/{id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject"
@@ -545,6 +579,7 @@ pub async fn gmail_search(
                 from: header("From"),
                 subject: header("Subject"),
                 date_ms,
+                filter_ids,
             })
         }
     }))
@@ -644,13 +679,18 @@ mod tests {
         values.iter().map(|s| s.to_string()).collect()
     }
 
+    /// The query a filter scans with, with no date window.
+    fn q(f: &MailFilter) -> String {
+        filter_query(f, 0, 0).expect("filter should have produced a query")
+    }
+
     #[test]
     fn one_domain_is_a_bare_from() {
         let f = MailFilter {
             domains: strings(&["substack.com"]),
             ..filter("Substack")
         };
-        assert_eq!(build_query(&[f], 0, 0).unwrap(), "from:substack.com");
+        assert_eq!(q(&f), "from:substack.com");
     }
 
     #[test]
@@ -661,9 +701,21 @@ mod tests {
             ..filter("Newsletters")
         };
         assert_eq!(
-            build_query(&[f], 0, 0).unwrap(),
+            q(&f),
             "from:(substack.com OR ghost.io OR news@example.com)"
         );
+    }
+
+    /// Gmail matches the name on a From header as well as the address, which
+    /// is what lets a publication be a sender. A name has spaces, so it's
+    /// quoted rather than dropped.
+    #[test]
+    fn a_senders_name_is_quoted_rather_than_dropped() {
+        let f = MailFilter {
+            senders: strings(&["Astral Codex Ten"]),
+            ..filter("ACX")
+        };
+        assert_eq!(q(&f), "from:\"Astral Codex Ten\"");
     }
 
     #[test]
@@ -675,7 +727,7 @@ mod tests {
             ..filter("Dispatch")
         };
         assert_eq!(
-            build_query(&[f], 0, 0).unwrap(),
+            q(&f),
             "from:example.com subject:\"Weekly Dispatch\" \"unsubscribe\""
         );
     }
@@ -687,13 +739,14 @@ mod tests {
             ..filter("Digests")
         };
         assert_eq!(
-            build_query(&[f], 0, 0).unwrap(),
+            q(&f),
             "subject:(\"Weekly Digest\" OR \"Monthly Digest\")"
         );
     }
 
+    /// Every filter is scanned separately, so each carries the window itself.
     #[test]
-    fn several_filters_are_ored_inside_the_date_window() {
+    fn the_date_window_lands_on_each_filters_own_query() {
         let a = MailFilter {
             domains: strings(&["substack.com"]),
             ..filter("Substack")
@@ -703,8 +756,12 @@ mod tests {
             ..filter("Issues")
         };
         assert_eq!(
-            build_query(&[a, b], 1_700_000_000_000, 1_700_086_400_000).unwrap(),
-            "((from:substack.com) OR (subject:\"Issue #\")) after:1700000000 before:1700086400"
+            filter_query(&a, 1_700_000_000_000, 1_700_086_400_000).unwrap(),
+            "from:substack.com after:1700000000 before:1700086400"
+        );
+        assert_eq!(
+            filter_query(&b, 1_700_000_000_000, 0).unwrap(),
+            "subject:\"Issue #\" after:1700000000"
         );
     }
 
@@ -714,40 +771,28 @@ mod tests {
             subjects: strings(&["  a \"quoted\"\nslice  "]),
             ..filter("Odd")
         };
-        assert_eq!(
-            build_query(&[f], 0, 0).unwrap(),
-            "subject:\"a quoted slice\""
-        );
+        assert_eq!(q(&f), "subject:\"a quoted slice\"");
     }
 
     #[test]
-    fn unusable_addresses_are_dropped_rather_than_escaped() {
+    fn unusable_senders_are_dropped_rather_than_escaped() {
         let f = MailFilter {
-            domains: strings(&["", "  ", "two words.com", "sub stack\")"]),
+            domains: strings(&["", "  ", "sub\"stack.com", "(nope)"]),
             senders: strings(&["news@example.com"]),
             ..filter("Messy")
         };
-        assert_eq!(build_query(&[f], 0, 0).unwrap(), "from:news@example.com");
+        assert_eq!(q(&f), "from:news@example.com");
     }
 
     #[test]
-    fn a_filter_with_no_usable_criteria_never_scans() {
-        assert!(build_query(&[], 0, 0).is_err());
-        assert!(build_query(&[filter("Empty")], 0, 0).is_err());
+    fn a_filter_with_no_usable_criteria_has_no_query() {
+        assert!(filter_query(&filter("Empty"), 0, 0).is_none());
         let blank = MailFilter {
             subjects: strings(&["   "]),
             ..filter("Blank")
         };
-        assert!(build_query(&[blank], 0, 0).is_err());
-    }
-
-    #[test]
-    fn an_unusable_filter_doesnt_take_the_scan_down_with_it() {
-        let good = MailFilter {
-            domains: strings(&["substack.com"]),
-            ..filter("Substack")
-        };
-        let bad = filter("Empty");
-        assert_eq!(build_query(&[good, bad], 0, 0).unwrap(), "from:substack.com");
+        assert!(filter_query(&blank, 0, 0).is_none());
+        // …even with a window, which would otherwise match the whole mailbox.
+        assert!(filter_query(&blank, 1_700_000_000_000, 0).is_none());
     }
 }

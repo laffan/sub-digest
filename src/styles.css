@@ -406,8 +406,39 @@ label.check.inline {
   color: var(--accent-dark);
 }
 
+/* Whether this filter's mail goes to the agent, and what it should take. */
+.filter-agent {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.filter-agent .agent-toggle {
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.filter-agent .hint {
+  margin: 6px 0;
+}
+
 .add-filter {
   width: 100%;
+}
+
+/* Marks what the agent reads — beside a filter's name, and on a publication
+   in the scan list once its posts know which filter found them. */
+.agent-tag {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--accent-dark);
+  background: #fbeee7;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px;
 }
 
 .agent-instructions {
@@ -725,6 +756,9 @@ button.link {
 }
 
 .filter-menu-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12.5px;
   font-weight: 600;
 }
@@ -822,49 +856,10 @@ button.link {
   flex: none;
 }
 
-.pub-menu-btn {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: none;
-  color: var(--muted);
-}
-
-.pub-menu-btn:hover {
-  background: #f1efe9;
-  color: var(--ink);
-}
-
-.pub-menu-btn.active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  background: #fbeee7;
-}
-
 .menu-scrim {
   position: fixed;
   inset: 0;
   z-index: 40;
-}
-
-.pub-menu {
-  position: absolute;
-  top: 26px;
-  right: 0;
-  z-index: 41;
-  min-width: 160px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(30, 25, 15, 0.18);
-  padding: 6px;
-  font-weight: 400;
 }
 
 .menu-check {

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AGENT_MODEL_LABEL } from "../anthropic";
 import {
   NORMALIZE,
   emptyFilter,
@@ -9,9 +10,18 @@ import type { FilterField, MailFilter } from "../types";
 
 interface Props {
   filters: MailFilter[];
+  /** Whether an Anthropic key is set; the agent can't run without one. */
+  hasKey: boolean;
   onChange: (filters: MailFilter[]) => void;
   onClose: () => void;
 }
+
+const AGENT_EXAMPLES = [
+  "Take every article this roundup recommends.",
+  "Only the articles in the main list — skip the 'also worth reading' section at the end.",
+  "Take each linked article, and pull its content from the .post-content div.",
+  "Skip anything on the publication's own site; take only the outside links.",
+];
 
 /** The criterion lists, in the order they appear on a filter card. */
 const FIELDS: {
@@ -29,7 +39,8 @@ const FIELDS: {
   {
     field: "senders",
     label: "Senders",
-    hint: "one address",
+    // Gmail's `from:` matches the name on the header as well as the address.
+    hint: "an address, or a name",
     placeholder: "news@example.com",
   },
   {
@@ -46,7 +57,7 @@ const FIELDS: {
   },
 ];
 
-export function FilterEditorModal({ filters, onChange, onClose }: Props) {
+export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props) {
   const update = (id: string, patch: Partial<MailFilter>) =>
     onChange(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
 
@@ -130,6 +141,59 @@ export function FilterEditorModal({ filters, onChange, onClose }: Props) {
               {filterIsEmpty(f) && (
                 <p className="hint">Add a criterion — a filter with none matches nothing.</p>
               )}
+
+              <div className="filter-agent">
+                <label className="check inline agent-toggle">
+                  <input
+                    type="checkbox"
+                    checked={f.useAgent}
+                    onChange={(e) => update(f.id, { useAgent: e.target.checked })}
+                  />
+                  Read this filter's mail with the AI agent
+                </label>
+
+                {f.useAgent && (
+                  <>
+                    <p className="hint">
+                      For link roundups, where the digest should carry the articles rather than a
+                      page of links. <strong>{AGENT_MODEL_LABEL}</strong> names the links this
+                      filter's mail recommends; the app fetches each one and lays it in as scraped.
+                      Say which links count and which to skip, and name a CSS selector if the
+                      linked pages need one to find their content.
+                    </p>
+                    {!hasKey && (
+                      <p className="hint warn">
+                        No Anthropic API key set — add one under Settings for the agent to run.
+                      </p>
+                    )}
+                    <textarea
+                      className="agent-instructions"
+                      value={f.instructions}
+                      onChange={(e) => update(f.id, { instructions: e.target.value })}
+                      rows={3}
+                      placeholder="e.g. Take every article this roundup recommends."
+                      aria-label={`Agent instructions for ${filterLabel(f)}`}
+                      autoCapitalize="sentences"
+                      spellCheck
+                    />
+                    {/* Out of the way once there's something written. */}
+                    {f.instructions.trim().length === 0 && (
+                      <div className="examples">
+                        <span className="hint">Examples:</span>
+                        {AGENT_EXAMPLES.map((ex) => (
+                          <button
+                            key={ex}
+                            className="example-chip"
+                            onClick={() => update(f.id, { instructions: ex })}
+                          >
+                            {ex}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </section>
           ))}
         </div>

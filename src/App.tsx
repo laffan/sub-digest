@@ -6,7 +6,6 @@ import { PostList } from "./components/PostList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { FilterEditorModal } from "./components/FilterEditorModal";
-import { AgentOptionsModal } from "./components/AgentOptionsModal";
 import { Preview } from "./components/Preview";
 import { OrganizePanel } from "./components/OrganizePanel";
 import { ContentPreview } from "./components/ContentPreview";
@@ -14,7 +13,7 @@ import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
 import { clearProcessed, loadProcessed, markProcessed } from "./processed";
-import { FILTERS_KEY, activeFilters, filterLabel, loadFilters } from "./filters";
+import { FILTERS_KEY, activeFilters, decidingFilter, filterLabel, loadFilters } from "./filters";
 import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
@@ -36,7 +35,6 @@ import {
   blockKey,
   outputFileName,
   withRemovals,
-  type AgentConfig,
   type DateRange,
   type DigestPost,
   type GeneratedOutput,
@@ -46,18 +44,7 @@ import {
 } from "./types";
 
 const SETTINGS_KEY = "subdigest.settings";
-const AGENTS_KEY = "subdigest.agentConfigs";
 const ANTHROPIC_KEY = "subdigest.anthropicKey";
-
-function loadJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw) as T;
-  } catch {
-    /* fall through */
-  }
-  return fallback;
-}
 
 function loadSettings(): LayoutSettings {
   try {
@@ -86,10 +73,6 @@ export default function App() {
   const [filters, setFilters] = useState<MailFilter[]>(loadFilters);
   const [showFilters, setShowFilters] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [agentConfigs, setAgentConfigs] = useState<Record<string, AgentConfig>>(() =>
-    loadJson(AGENTS_KEY, {})
-  );
-  const [agentOptionsFor, setAgentOptionsFor] = useState<string | null>(null);
   const [anthropicKey, setAnthropicKey] = useState(() => localStorage.getItem(ANTHROPIC_KEY) ?? "");
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
@@ -165,20 +148,16 @@ export default function App() {
     localStorage.setItem(FILTERS_KEY, JSON.stringify(filters));
   }, [filters]);
 
-  useEffect(() => {
-    localStorage.setItem(AGENTS_KEY, JSON.stringify(agentConfigs));
-  }, [agentConfigs]);
-
   // Switching format leaves the preview showing the other format's document.
   useEffect(() => {
     setOutput(null);
   }, [settings.format]);
 
-  // Agent settings decide how a post is parsed, so cached entries are stale
-  // the moment they change.
+  // A filter decides how the mail it found is read, so a changed filter makes
+  // every cached entry stale.
   useEffect(() => {
     entryCache.current.clear();
-  }, [agentConfigs, anthropicKey]);
+  }, [filters, anthropicKey]);
 
   // Striking material out changes what a generated document would contain.
   useEffect(() => {
@@ -196,20 +175,6 @@ export default function App() {
   const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
     localStorage.setItem(ANTHROPIC_KEY, key);
-  }, []);
-
-  const toggleAgent = useCallback((name: string, useAgent: boolean) => {
-    setAgentConfigs((cfgs) => ({
-      ...cfgs,
-      [name]: { instructions: cfgs[name]?.instructions ?? "", useAgent },
-    }));
-  }, []);
-
-  const saveAgentInstructions = useCallback((name: string, instructions: string) => {
-    setAgentConfigs((cfgs) => ({
-      ...cfgs,
-      [name]: { useAgent: cfgs[name]?.useAgent ?? true, instructions },
-    }));
   }, []);
 
   const connect = useCallback(async () => {
@@ -305,6 +270,16 @@ export default function App() {
 
   const selectedCount = useMemo(() => posts.filter((p) => p.selected).length, [posts]);
 
+  // Which of the discovered posts the agent will read, so the list can say so
+  // before the user commits to a run. Same rule Organize uses.
+  const agentPosts = useMemo(() => {
+    const ids = new Set<string>();
+    for (const p of posts) {
+      if (decidingFilter(filters, p.filterIds)?.useAgent) ids.add(p.id);
+    }
+    return ids;
+  }, [posts, filters]);
+
   /**
    * Fetches and parses every selected post, one at a time, so the Organize
    * step can show them arriving. Starts chronological; the user reorders from
@@ -339,7 +314,8 @@ export default function App() {
             { id: p.id, publication: p.publication, title: p.subject, dateMs: p.dateMs, blocks },
           ];
         };
-        const agent = agentConfigs[p.publication];
+        // The filter that found this post decides how it's read.
+        const agent = decidingFilter(filters, p.filterIds);
         let entries = entryCache.current.get(p.id);
         if (entries === undefined) {
           if (agent?.useAgent && anthropicKey.trim()) {
@@ -374,7 +350,7 @@ export default function App() {
                 // Expected for anything that isn't a link roundup — note it and move on.
                 logWarn("agent", `No links found in "${p.subject}" — used default parsing`);
               } else {
-                const message = `Agent failed for "${p.publication}" — used default parsing. ${detail}`;
+                const message = `Agent failed for "${filterLabel(agent)}" — used default parsing. ${detail}`;
                 setError(message);
                 logError("agent", message);
               }
@@ -398,7 +374,7 @@ export default function App() {
     } finally {
       setPreparing(false);
     }
-  }, [posts, agentConfigs, anthropicKey, report, fail]);
+  }, [posts, filters, anthropicKey, report, fail]);
 
   /** Reorders the digest; any document already generated no longer matches. */
   const reorderPost = useCallback((from: number, to: number) => {
@@ -550,7 +526,7 @@ export default function App() {
                   range={range}
                   rangeValid={scanWindow !== null}
                   scanning={scanning}
-                  agentConfigs={agentConfigs}
+                  agentPosts={agentPosts}
                   filters={filters}
                   processed={processedBefore}
                   onDaysChange={setDays}
@@ -561,8 +537,6 @@ export default function App() {
                   onTogglePost={togglePost}
                   onSetPostsSelected={setPostsSelected}
                   onTogglePublication={togglePublication}
-                  onToggleAgent={toggleAgent}
-                  onOpenAgentOptions={setAgentOptionsFor}
                 />
               )}
             </div>
@@ -671,6 +645,7 @@ export default function App() {
       {showFilters && (
         <FilterEditorModal
           filters={filters}
+          hasKey={anthropicKey.trim().length > 0}
           onChange={setFilters}
           onClose={() => setShowFilters(false)}
         />
@@ -683,16 +658,6 @@ export default function App() {
           processedCount={processedCount}
           onForgetProcessed={forgetProcessed}
           onClose={() => setShowSettings(false)}
-        />
-      )}
-
-      {agentOptionsFor && (
-        <AgentOptionsModal
-          publication={agentOptionsFor}
-          instructions={agentConfigs[agentOptionsFor]?.instructions ?? ""}
-          hasKey={anthropicKey.trim().length > 0}
-          onSave={(instructions) => saveAgentInstructions(agentOptionsFor, instructions)}
-          onClose={() => setAgentOptionsFor(null)}
         />
       )}
     </div>

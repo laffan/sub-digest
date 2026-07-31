@@ -1,4 +1,4 @@
-/** Metadata for one Substack email discovered in the mailbox. */
+/** Metadata for one newsletter email discovered in the mailbox. */
 export interface PostMeta {
   id: string;
   /** Raw From header, e.g. `Astral Codex Ten <astralcodexten@substack.com>` */
@@ -6,6 +6,13 @@ export interface PostMeta {
   subject: string;
   /** Gmail internalDate, milliseconds since epoch */
   dateMs: number;
+  /**
+   * The filters that found this message, in the order they're configured. A
+   * scan runs each filter as its own query precisely to learn this: search
+   * terms match the body, so which filter caught a message can't be worked
+   * out from its headers afterwards. It's what decides how the post is read.
+   */
+  filterIds: string[];
 }
 
 /** A post with its publication name resolved and selection state. */
@@ -51,16 +58,19 @@ export interface MailFilter {
   subjects: string[];
   /** Free search terms, matched anywhere in the message. */
   terms: string[];
+  /**
+   * Read the mail this filter finds with the AI agent rather than the default
+   * parser — for link roundups, where the digest should carry the articles
+   * rather than the page of links. Being per-filter is the point: carve the
+   * roundups out with their own filter and only they go to the agent.
+   */
+  useAgent: boolean;
+  /** What the agent should take from this filter's mail. */
+  instructions: string;
 }
 
 /** The criterion lists on a filter — everything but its id, name and state. */
 export type FilterField = "domains" | "senders" | "subjects" | "terms";
-
-/** Per-publication agent configuration, keyed by publication name. */
-export interface AgentConfig {
-  useAgent: boolean;
-  instructions: string;
-}
 
 export type FontFamily = "Helvetica" | "Times" | "Courier";
 export type PageSizeName = "A5" | "HalfLetter" | "A4" | "Letter";
