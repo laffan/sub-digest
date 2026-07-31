@@ -272,18 +272,89 @@ body {
   margin: 12px 0 10px;
 }
 
+/* One filter is open at a time; the rest are a line each. */
 .filter-card {
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 12px;
+  padding: 6px 12px;
   background: #fbfaf8;
+}
+
+.filter-card.open {
+  padding: 12px;
 }
 
 .filter-card-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 4px;
+}
+
+/* Collapsed, the whole row is the way in. */
+button.filter-card-head {
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  color: var(--ink);
+}
+
+.filter-head-name {
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.filter-head-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-toggle {
+  flex: none;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+}
+
+.filter-toggle:hover,
+button.filter-card-head:hover .filter-caret {
+  color: var(--ink);
+}
+
+/* Down when the filter is open, along the row when it isn't. */
+.filter-caret {
+  flex: none;
+  transition: transform 0.12s ease;
+}
+
+.filter-card:not(.open) .filter-caret {
+  transform: rotate(-90deg);
+}
+
+/* Remove sits under everything, on its own. */
+.filter-card-foot {
+  display: flex;
+  justify-content: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
 .filter-name {

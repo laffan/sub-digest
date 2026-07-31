@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NORMALIZE, emptyFilter, filterLabel } from "../filters";
+import { NORMALIZE, emptyFilter, filterLabel, filterSummary } from "../filters";
 import type { FilterField, MailFilter } from "../types";
 
 interface Props {
@@ -30,11 +30,23 @@ const AGENT_EXAMPLES = [
 ];
 
 export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props) {
+  // One filter open at a time: the rest stay as a list you can read at a
+  // glance. Opening starts on the first, so the editor isn't a wall of rows.
+  const [openId, setOpenId] = useState<string | null>(filters[0]?.id ?? null);
+
   const update = (id: string, patch: Partial<MailFilter>) =>
     onChange(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
 
-  const addFilter = () => onChange([...filters, emptyFilter("")]);
-  const removeFilter = (id: string) => onChange(filters.filter((f) => f.id !== id));
+  const addFilter = () => {
+    const added = emptyFilter("");
+    onChange([...filters, added]);
+    setOpenId(added.id); // a new filter is what you came to fill in
+  };
+
+  const removeFilter = (id: string) => {
+    onChange(filters.filter((f) => f.id !== id));
+    if (openId === id) setOpenId(null);
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -56,73 +68,107 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
 
         <div className="filter-cards">
           {filters.map((f) => (
-            <section className="filter-card" key={f.id}>
-              <div className="filter-card-head">
-                <input
-                  className="filter-name"
-                  type="text"
-                  value={f.name}
-                  onChange={(e) => update(f.id, { name: e.target.value })}
-                  placeholder={filterLabel(f)}
-                  aria-label="Filter name"
-                  spellCheck={false}
-                />
-                <button
-                  className="link danger"
-                  onClick={() => removeFilter(f.id)}
-                  aria-label={`Remove filter ${filterLabel(f)}`}
-                >
-                  Remove
-                </button>
-              </div>
-
-              <RuleList filter={f} onUpdate={(patch) => update(f.id, patch)} />
-
-              <div className="filter-agent">
-                <label className="check inline agent-toggle">
+            <section className={`filter-card${f.id === openId ? " open" : ""}`} key={f.id}>
+              {f.id === openId ? (
+                <div className="filter-card-head">
+                  <button
+                    className="filter-toggle"
+                    onClick={() => setOpenId(null)}
+                    aria-expanded
+                    aria-controls={`filter-body-${f.id}`}
+                    aria-label={`Collapse ${filterLabel(f)}`}
+                  >
+                    <CaretIcon />
+                  </button>
                   <input
-                    type="checkbox"
-                    checked={f.useAgent}
-                    onChange={(e) => update(f.id, { useAgent: e.target.checked })}
+                    className="filter-name"
+                    type="text"
+                    value={f.name}
+                    onChange={(e) => update(f.id, { name: e.target.value })}
+                    placeholder={filterLabel(f)}
+                    aria-label="Filter name"
+                    spellCheck={false}
                   />
-                  Retrieve Links with AI agent
-                </label>
+                  {f.useAgent && <span className="agent-tag">agent</span>}
+                </div>
+              ) : (
+                <button
+                  className="filter-card-head collapsed"
+                  onClick={() => setOpenId(f.id)}
+                  aria-expanded={false}
+                  aria-controls={`filter-body-${f.id}`}
+                >
+                  {/* Same box as the open card's toggle, so the rows line up. */}
+                  <span className="filter-toggle">
+                    <CaretIcon />
+                  </span>
+                  <span className="filter-head-name">{filterLabel(f)}</span>
+                  <span className="filter-head-summary">{filterSummary(f)}</span>
+                  {f.useAgent && <span className="agent-tag">agent</span>}
+                </button>
+              )}
 
-                {f.useAgent && (
-                  <>
-                    {!hasKey && (
-                      <p className="hint warn">
-                        No Anthropic API key set — add one under Settings for the agent to run.
-                      </p>
+              {f.id === openId && (
+                <div className="filter-card-body" id={`filter-body-${f.id}`}>
+                  <RuleList filter={f} onUpdate={(patch) => update(f.id, patch)} />
+
+                  <div className="filter-agent">
+                    <label className="check inline agent-toggle">
+                      <input
+                        type="checkbox"
+                        checked={f.useAgent}
+                        onChange={(e) => update(f.id, { useAgent: e.target.checked })}
+                      />
+                      Retrieve Links with AI agent
+                    </label>
+
+                    {f.useAgent && (
+                      <>
+                        {!hasKey && (
+                          <p className="hint warn">
+                            No Anthropic API key set — add one under Settings for the agent to run.
+                          </p>
+                        )}
+                        <textarea
+                          className="agent-instructions"
+                          value={f.instructions}
+                          onChange={(e) => update(f.id, { instructions: e.target.value })}
+                          rows={3}
+                          placeholder="e.g. Take every article this roundup recommends."
+                          aria-label={`Agent instructions for ${filterLabel(f)}`}
+                          autoCapitalize="sentences"
+                          spellCheck
+                        />
+                        {/* Out of the way once there's something written. */}
+                        {f.instructions.trim().length === 0 && (
+                          <div className="examples">
+                            <span className="hint">Examples:</span>
+                            {AGENT_EXAMPLES.map((ex) => (
+                              <button
+                                key={ex}
+                                className="example-chip"
+                                onClick={() => update(f.id, { instructions: ex })}
+                              >
+                                {ex}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </>
                     )}
-                    <textarea
-                      className="agent-instructions"
-                      value={f.instructions}
-                      onChange={(e) => update(f.id, { instructions: e.target.value })}
-                      rows={3}
-                      placeholder="e.g. Take every article this roundup recommends."
-                      aria-label={`Agent instructions for ${filterLabel(f)}`}
-                      autoCapitalize="sentences"
-                      spellCheck
-                    />
-                    {/* Out of the way once there's something written. */}
-                    {f.instructions.trim().length === 0 && (
-                      <div className="examples">
-                        <span className="hint">Examples:</span>
-                        {AGENT_EXAMPLES.map((ex) => (
-                          <button
-                            key={ex}
-                            className="example-chip"
-                            onClick={() => update(f.id, { instructions: ex })}
-                          >
-                            {ex}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
+                  </div>
+
+                  <div className="filter-card-foot">
+                    <button
+                      className="link danger"
+                      onClick={() => removeFilter(f.id)}
+                      aria-label={`Remove filter ${filterLabel(f)}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              )}
             </section>
           ))}
         </div>
@@ -138,6 +184,27 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
         </div>
       </div>
     </div>
+  );
+}
+
+function CaretIcon() {
+  return (
+    <svg
+      className="filter-caret"
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M6 9l6 6 6-6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -166,7 +233,7 @@ function RuleList({ filter, onUpdate }: RuleListProps) {
 
   // Grouped by type, in the order the types are listed.
   const rules = RULE_TYPES.flatMap(({ field, label }) =>
-    filter[field].map((v) => ({ field, label, value: v }))
+    filter[field].map((v) => ({ field, label, value: v })),
   );
 
   return (

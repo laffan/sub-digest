@@ -17,7 +17,9 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    **Filters**, beside the Posts heading, lists what you've saved with a
    checkbox on each — that's where filters are switched on and off — and a scan
    uses the ones you've ticked. **Edit Filters…** at the foot of that list
-   opens the editor, where filters are added and removed.
+   opens the editor, where filters are added and removed. One filter is open at
+   a time; the rest sit as a line each, name and what they match, so a dozen of
+   them still read at a glance.
 
    A filter is a list of **rules**, each a type and a value:
 
