@@ -104,17 +104,6 @@ async function embedFonts(doc: PDFDocument, s: LayoutSettings): Promise<FontSet>
 }
 
 /**
- * A floated image the text wraps around: it occupies one side of the column
- * from the current y down to `bottomY`; lines above `bottomY` are narrowed.
- */
-interface FloatRegion {
-  side: "left" | "right";
-  width: number;
-  gap: number;
-  bottomY: number;
-}
-
-/**
  * Column-flow cursor over a growing document: tracks the current page,
  * column and y position, and adds columns/pages on demand.
  */
@@ -134,10 +123,6 @@ class Flow {
   y = 0;
   private started = false;
   private pagesAdded = 0;
-
-  /** The image the current text is wrapping around, if any. */
-  activeFloat: FloatRegion | null = null;
-  private floatCount = 0;
 
   constructor(
     private doc: PDFDocument,
@@ -184,7 +169,6 @@ class Flow {
     this.pagesAdded += 1;
     this.col = 0;
     this.y = this.pageH - this.mTop;
-    this.activeFloat = null; // a float never spans columns/pages
   }
 
   /** 1-based number of the page currently being drawn. */
@@ -197,7 +181,6 @@ class Flow {
     if (this.col + 1 < this.cols) {
       this.col += 1;
       this.y = this.pageH - this.mTop;
-      this.activeFloat = null;
     } else {
       this.addPage();
     }
@@ -219,56 +202,37 @@ class Flow {
     return this.doc.embedJpg(bytes);
   }
 
-  /** The x/width available for a line at the current y, accounting for a float. */
+  /** The x/width available for a line at the current y. */
   lineBox(indent: number): { x: number; width: number } {
-    let x0 = this.colX;
-    let w = this.colW;
-    const f = this.activeFloat;
-    if (f && this.y > f.bottomY + 0.01) {
-      const reserved = f.width + f.gap;
-      if (f.side === "left") x0 = this.colX + reserved;
-      w = this.colW - reserved;
-    }
-    return { x: x0 + indent, width: Math.max(w - indent, this.colW * 0.15) };
-  }
-
-  /** Ends the active float, dropping the cursor below the image if still beside it. */
-  clearFloat() {
-    if (this.activeFloat) {
-      if (this.y > this.activeFloat.bottomY) this.y = this.activeFloat.bottomY;
-      this.activeFloat = null;
-    }
+    return {
+      x: this.colX + indent,
+      width: Math.max(this.colW - indent, this.colW * 0.15),
+    };
   }
 
   /**
-   * Draws an image floated to the alternating side at ≤50% column width, and
-   * records the region so subsequent text wraps beside it. Does not advance y.
+   * Draws an image as a block of its own: text runs above and below it, never
+   * beside it. It spans the column, unless holding its aspect ratio within the
+   * height cap makes it narrower, in which case it's centred. Advances y past
+   * the image.
    */
-  placeFloat(pdfImage: PDFImage, img: PreparedImage, body: number) {
+  placeImage(pdfImage: PDFImage, img: PreparedImage) {
     this.ensureStarted();
-    const gap = body * 0.7;
-    let w = this.colW * 0.5;
+    let w = this.colW;
     let h = (img.height / img.width) * w;
-    const maxH = this.colHeight * 0.55;
+    // A tall picture would otherwise take the column on its own; cap it so
+    // there's room for text above and below it.
+    const maxH = this.colHeight * 0.6;
     if (h > maxH) {
       h = maxH;
       w = (img.width / img.height) * h;
     }
-    // Ensure vertical room; a fresh-but-too-short column shrinks, otherwise wrap.
-    if (this.remaining < h + body * 0.5) {
-      if (this.remaining >= this.colHeight - 1) {
-        h = this.remaining - body * 0.5;
-        w = (img.width / img.height) * h;
-      } else {
-        this.nextColumn();
-      }
-    }
-    const side: "left" | "right" = this.floatCount % 2 === 0 ? "right" : "left";
-    this.floatCount += 1;
-    const x = side === "left" ? this.colX : this.colX + this.colW - w;
-    const top = this.y;
-    this.page.drawImage(pdfImage, { x, y: top - h, width: w, height: h });
-    this.activeFloat = { side, width: w, gap, bottomY: top - h };
+    // Keep it whole: an image that doesn't fit here starts the next column
+    // rather than running off the bottom of this one.
+    this.fit(h);
+    const x = this.colX + (this.colW - w) / 2;
+    this.page.drawImage(pdfImage, { x, y: this.y - h, width: w, height: h });
+    this.advance(h);
   }
 
   /** Numbers every page; called before the cover is inserted in front. */
@@ -384,8 +348,8 @@ function hardBreak(word: string, font: PDFFont, size: number, width: number): [s
 }
 
 /**
- * Lays out a paragraph line by line, recomputing the available width for each
- * line so text wraps around any active floated image.
+ * Lays out a paragraph line by line, taking the available width from the flow
+ * each time, since a line can carry over into the next column.
  */
 function drawParagraph(flow: Flow, text: string, opts: ParaOpts) {
   const clean = sanitize(text);
@@ -447,7 +411,6 @@ function drawParagraph(flow: Flow, text: string, opts: ParaOpts) {
 async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Promise<number> {
   const body = s.fontSize;
   flow.ensureStarted();
-  flow.clearFloat(); // a prior post's float never carries into this one
 
   // Keep the header together. This has to measure the real wrapped height, not
   // guess: if the title spilled into the next column the page recorded below
@@ -523,7 +486,6 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
   for (const block of post.blocks) {
     await layoutBlock(flow, block, s);
   }
-  flow.clearFloat(); // drop below any trailing floated image before the next post
   return startPage;
 }
 
@@ -590,14 +552,13 @@ async function layoutBlock(flow: Flow, block: Block, s: LayoutSettings) {
       const prepared = await prepareImage(block.src);
       if (prepared) {
         const pdfImage = await flow.embedJpg(prepared.jpeg);
-        flow.clearFloat(); // stack floats vertically rather than overlapping
-        flow.advance(body * 0.4);
-        flow.placeFloat(pdfImage, prepared, body);
+        flow.advance(body * 0.5);
+        flow.placeImage(pdfImage, prepared);
+        flow.advance(body * 0.6);
       }
       break;
     }
     case "rule": {
-      flow.clearFloat();
       flow.fit(body * 2);
       flow.advance(body);
       const cx = flow.colX + flow.colW / 2;

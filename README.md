@@ -78,8 +78,8 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    both take the same posts in the order set in **Organize**.
 
    - **PDF** — a custom layout engine flows the posts (publication name, title,
-     date, and body text) into fixed pages, with images floated to alternating
-     sides at up to half-column width so text wraps around them. An optional
+     date, and body text) into fixed pages. An image is a block of its own,
+     across the column, with text above and below it and never beside it. An optional
      cover carries a table of contents listing **every** post — title,
      publication, date and page number, running onto further contents pages
      when one isn't enough — and each entry is a clickable link to the page the
@@ -328,7 +328,7 @@ Two things worth knowing about what comes out:
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |
 | Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists as lists, quotes as quotes, images as images — with nested matches emitted once. Image addresses are resolved against the page, and lazy-loaded `data-src`/`srcset` are read, so a placeholder `src` doesn't cost you the picture |
 | Body-copy detection | `src-tauri/src/anthropic.rs` | Rather than taking every readable tag on the page, it works out where the piece actually lives: each paragraph's length is credited to all its ancestors, and the **deepest** container still holding ~90% of the best score wins — which narrows `body > div > article` down to the article. Furniture (`nav`/`header`/`footer`/`aside`/`form`, `aria-hidden`, and classes made of words like `comments`, `share`, `subscription`, `sidebar`, `related`) is dropped first, so it can't win on a long comment thread. Class names are matched **word by word**, never as substrings — Substack's own article is `class="newsletter-post"`, which a substring match for "newsletter" would discard wholesale. The container it settled on is named in the log |
-| PDF layout engine | `src/pdf/layout.ts` | Column flow, per-line word wrap around alternating floated images, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib |
+| PDF layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib. Images break the column rather than sit in it: each spans the measure, keeps its aspect ratio, and starts the next column rather than run off the bottom of this one. A picture taller than 60% of the column is scaled down to that and centred, so no image takes a column on its own |
 | EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters and by the Organize preview, which shows the same re-encoded image it will print. The preview fetches lazily (`IntersectionObserver`, a screen ahead), so a hundred-image digest doesn't stall the step for pictures nobody has scrolled to |
