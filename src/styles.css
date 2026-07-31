@@ -180,9 +180,9 @@ body {
   box-shadow: 0 12px 40px rgba(30, 25, 15, 0.25);
 }
 
-/* The filter editor holds several criteria side by side; it needs the room. */
+/* The filter editor's rule rows want more width than a settings column. */
 .modal.wide {
-  max-width: 560px;
+  max-width: 520px;
 }
 
 .modal-head {
@@ -206,21 +206,6 @@ body {
 .link.danger:disabled {
   color: var(--muted);
   opacity: 0.5;
-}
-
-.chip-add {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.chip-add input {
-  margin-top: 0;
-  flex: 1;
-}
-
-.chip-add button {
-  flex: none;
 }
 
 .modal-section {
@@ -317,93 +302,88 @@ label.check.inline {
   color: var(--muted);
 }
 
-/* Four criteria per filter is a long column on its own, so they pair up. */
-.chip-fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 14px;
-  margin-top: 10px;
-}
-
-/* Narrow windows (and the iPad in portrait) get them stacked instead. */
-@media (max-width: 620px) {
-  .chip-fields {
-    grid-template-columns: 1fr;
-  }
-}
-
-.chip-field {
-  min-width: 0;
-}
-
-.chip-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.chip-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink);
-  white-space: nowrap;
-}
-
-.chip-hint {
-  font-size: 11px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chips {
+/* A filter's rules: type, value, and a way to take one out. */
+.rules {
   list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin: 0 0 6px;
+  margin: 10px 0 8px;
   padding: 0;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 3px 4px 3px 8px;
-  font-size: 12px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 8px;
+  overflow: hidden;
   background: var(--panel);
 }
 
-.chip-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.rule {
+  display: grid;
+  grid-template-columns: 122px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px 5px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
 }
 
-.chip-x {
+.rule:last-child {
+  border-bottom: none;
+}
+
+.rule-type {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.rule-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rules-empty {
+  padding: 9px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rule-x {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   font-size: 10px;
   line-height: 1;
   border: none;
-  border-radius: 999px;
+  border-radius: 6px;
   background: none;
   color: var(--muted);
 }
 
-.chip-x:hover {
+.rule-x:hover {
   background: #f1efe9;
   color: var(--accent-dark);
+}
+
+/* Rule type, its value, and Add Rule — one row under the list. */
+.rule-add {
+  display: flex;
+  gap: 8px;
+}
+
+.rule-add select {
+  margin-top: 0;
+  width: 132px;
+  flex: none;
+}
+
+.rule-add input {
+  margin-top: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.rule-add button {
+  flex: none;
 }
 
 /* Whether this filter's mail goes to the agent, and what it should take. */
@@ -413,7 +393,7 @@ label.check.inline {
   border-top: 1px solid var(--border);
 }
 
-.filter-agent .agent-toggle {
+label.check.inline.agent-toggle {
   color: var(--ink);
   font-size: 12.5px;
 }
@@ -501,7 +481,8 @@ label.check.inline {
     height: 40px;
   }
   .modal button,
-  .chip-add input,
+  .rule-add input,
+  .rule-add select,
   .filter-name,
   .format-toggle button {
     min-height: 44px;
@@ -510,11 +491,11 @@ label.check.inline {
     min-height: 44px;
     padding: 0 6px;
   }
-  /* A chip's ✕ sits inside the pill, so it stays pill-sized. */
-  .chip-x {
-    width: 26px;
-    height: 26px;
-    min-height: 26px;
+  /* A rule's ✕ sits in its row, so it stays row-sized. */
+  .rule-x {
+    width: 30px;
+    height: 30px;
+    min-height: 30px;
   }
   .filters-btn,
   .filter-menu .menu-check,

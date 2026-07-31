@@ -15,29 +15,35 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    start and end date (both days included) — and groups it by publication.
 
    **Filters**, beside the Posts heading, lists what you've saved with a
-   checkbox on each, and a scan uses the ones you've ticked. **Edit Filters…**
-   at the foot of that list opens the editor, where filters are added and
-   removed. A filter is any combination of four kinds of criterion: sender
-   domains (`substack.com`, `ghost.io`), whole addresses
-   (`news@example.com`), text the **subject line** has to contain (newsletters
-   tend to run the same words every issue — `Weekly Digest`, `Issue #`), and
-   search terms matched anywhere in the message. Within one filter every kind
-   you set has to hold and any one value of that kind will do, so
-   `substack.com` plus the subject slice `Weekly` finds Substack mail whose
-   subject carries "Weekly" and nothing else. Across filters it's an OR: each
-   one is its own way in, and each runs as its own Gmail query — so every
+   checkbox on each — that's where filters are switched on and off — and a scan
+   uses the ones you've ticked. **Edit Filters…** at the foot of that list
+   opens the editor, where filters are added and removed.
+
+   A filter is a list of **rules**, each a type and a value:
+
+   | Rule | Matches |
+   | --- | --- |
+   | **Sender domain** | everything from a publisher — `substack.com`, `ghost.io` |
+   | **Sender** | one address, or the name on the From header — `news@example.com`, `The Browser` |
+   | **Subject contains** | standing text in the subject line — `Weekly Digest`, `Issue #` |
+   | **Search term** | words anywhere in the message |
+
+   Rules of the same type are alternatives; the types a filter uses all have to
+   hold. So `substack.com` plus the subject rule `Weekly` finds Substack mail
+   whose subject carries "Weekly" and nothing else. Across filters it's an OR:
+   each one is its own way in, and each runs as its own Gmail query — so every
    message comes back knowing which filters found it.
 
-   Each filter also decides **how** its mail is read. Tick *Read this
-   filter's mail with the AI agent* on one and everything it finds goes to
-   the agent, with the instructions you write there; leave it off and the
-   normal parser handles it. That's what makes a filter worth carving out:
-   put the link roundups in their own filter — a subject slice is usually
-   enough — switch the agent on for that one, and the rest of your mail is
-   untouched. When a message matches several filters, an agentic one wins
-   (that's the point of carving it out), and otherwise the first in your
-   list. Publications that end up agent-read are marked `agent` in the scan
-   list, and so are agentic filters in the Filters popup.
+   Each filter also decides **how** its mail is read. Tick *Retrieve Links
+   with AI agent* on one and everything it finds goes to the agent, with the
+   instructions you write there; leave it off and the normal parser handles it.
+   That's what makes a filter worth carving out: put the link roundups in their
+   own filter — a subject rule is usually enough — switch the agent on for that
+   one, and the rest of your mail is untouched. When a message matches several
+   filters, an agentic one wins (that's the point of carving it out), and
+   otherwise the first in your list. Publications that end up agent-read are
+   marked `agent` in the scan list, and so are agentic filters in the Filters
+   popup.
 
    Filters live on the device. An install that predates them carries its
    sender domains across as one filter, and each publication it had the

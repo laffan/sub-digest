@@ -1,11 +1,5 @@
 import { useState } from "react";
-import { AGENT_MODEL_LABEL } from "../anthropic";
-import {
-  NORMALIZE,
-  emptyFilter,
-  filterIsEmpty,
-  filterLabel,
-} from "../filters";
+import { NORMALIZE, emptyFilter, filterLabel } from "../filters";
 import type { FilterField, MailFilter } from "../types";
 
 interface Props {
@@ -16,45 +10,23 @@ interface Props {
   onClose: () => void;
 }
 
+/**
+ * A rule is one value on one of a filter's criterion lists. The list is the
+ * filter: rules of the same type are alternatives, and the types a filter uses
+ * all have to hold.
+ */
+const RULE_TYPES: { field: FilterField; label: string; placeholder: string }[] = [
+  { field: "domains", label: "Sender domain", placeholder: "substack.com" },
+  { field: "senders", label: "Sender", placeholder: "news@example.com" },
+  { field: "subjects", label: "Subject contains", placeholder: "Weekly Digest" },
+  { field: "terms", label: "Search term", placeholder: "unsubscribe" },
+];
+
 const AGENT_EXAMPLES = [
   "Take every article this roundup recommends.",
   "Only the articles in the main list — skip the 'also worth reading' section at the end.",
   "Take each linked article, and pull its content from the .post-content div.",
   "Skip anything on the publication's own site; take only the outside links.",
-];
-
-/** The criterion lists, in the order they appear on a filter card. */
-const FIELDS: {
-  field: FilterField;
-  label: string;
-  hint: string;
-  placeholder: string;
-}[] = [
-  {
-    field: "domains",
-    label: "Sender domains",
-    hint: "a whole publisher",
-    placeholder: "substack.com",
-  },
-  {
-    field: "senders",
-    label: "Senders",
-    // Gmail's `from:` matches the name on the header as well as the address.
-    hint: "an address, or a name",
-    placeholder: "news@example.com",
-  },
-  {
-    field: "subjects",
-    label: "Subject contains",
-    hint: "standing text in the subject",
-    placeholder: "Weekly Digest",
-  },
-  {
-    field: "terms",
-    label: "Search terms",
-    hint: "anywhere in the message",
-    placeholder: "unsubscribe",
-  },
 ];
 
 export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props) {
@@ -80,19 +52,7 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
           </button>
         </div>
 
-        <p className="hint">
-          Each filter is one way of finding newsletters. Within a filter, every kind of criterion
-          you set has to hold and any one value of that kind will do — so{" "}
-          <code>substack.com</code> with the subject slice <code>Weekly</code> finds Substack mail
-          whose subject carries "Weekly". A scan runs the filters you've enabled, and mail matching
-          any of them turns up.
-        </p>
-
-        {filters.length === 0 && (
-          <p className="hint warn">
-            No filters yet — add one below, or a scan has nothing to look for.
-          </p>
-        )}
+        {filters.length === 0 && <p className="hint">No filters yet.</p>}
 
         <div className="filter-cards">
           {filters.map((f) => (
@@ -107,14 +67,6 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
                   aria-label="Filter name"
                   spellCheck={false}
                 />
-                <label className="check inline">
-                  <input
-                    type="checkbox"
-                    checked={f.enabled}
-                    onChange={(e) => update(f.id, { enabled: e.target.checked })}
-                  />
-                  Enabled
-                </label>
                 <button
                   className="link danger"
                   onClick={() => removeFilter(f.id)}
@@ -124,23 +76,7 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
                 </button>
               </div>
 
-              <div className="chip-fields">
-                {FIELDS.map(({ field, label, hint, placeholder }) => (
-                  <ChipField
-                    key={field}
-                    label={label}
-                    hint={hint}
-                    placeholder={placeholder}
-                    values={f[field]}
-                    normalize={NORMALIZE[field]}
-                    onChange={(values) => update(f.id, { [field]: values })}
-                  />
-                ))}
-              </div>
-
-              {filterIsEmpty(f) && (
-                <p className="hint">Add a criterion — a filter with none matches nothing.</p>
-              )}
+              <RuleList filter={f} onUpdate={(patch) => update(f.id, patch)} />
 
               <div className="filter-agent">
                 <label className="check inline agent-toggle">
@@ -149,18 +85,11 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
                     checked={f.useAgent}
                     onChange={(e) => update(f.id, { useAgent: e.target.checked })}
                   />
-                  Read this filter's mail with the AI agent
+                  Retrieve Links with AI agent
                 </label>
 
                 {f.useAgent && (
                   <>
-                    <p className="hint">
-                      For link roundups, where the digest should carry the articles rather than a
-                      page of links. <strong>{AGENT_MODEL_LABEL}</strong> names the links this
-                      filter's mail recommends; the app fetches each one and lays it in as scraped.
-                      Say which links count and which to skip, and name a CSS selector if the
-                      linked pages need one to find their content.
-                    </p>
                     {!hasKey && (
                       <p className="hint warn">
                         No Anthropic API key set — add one under Settings for the agent to run.
@@ -212,75 +141,91 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
   );
 }
 
-interface ChipFieldProps {
-  label: string;
-  hint: string;
-  placeholder: string;
-  values: string[];
-  /** Tidies a typed value into the form the query builder wants. */
-  normalize: (raw: string) => string;
-  onChange: (values: string[]) => void;
+interface RuleListProps {
+  filter: MailFilter;
+  onUpdate: (patch: Partial<MailFilter>) => void;
 }
 
-/** One criterion: the values already added, and a box to add another. */
-function ChipField({ label, hint, placeholder, values, normalize, onChange }: ChipFieldProps) {
-  const [input, setInput] = useState("");
+/** A filter's rules, and the row that adds another. */
+function RuleList({ filter, onUpdate }: RuleListProps) {
+  const [type, setType] = useState<FilterField>("domains");
+  const [value, setValue] = useState("");
 
-  const candidate = normalize(input);
-  const duplicate = candidate.length > 0 && values.includes(candidate);
+  const spec = RULE_TYPES.find((t) => t.field === type) ?? RULE_TYPES[0];
+  const candidate = NORMALIZE[type](value);
+  const duplicate = candidate.length > 0 && filter[type].includes(candidate);
 
   const add = () => {
     if (!candidate || duplicate) return;
-    onChange([...values, candidate]);
-    setInput("");
+    onUpdate({ [type]: [...filter[type], candidate] });
+    setValue("");
   };
 
+  const remove = (field: FilterField, dropped: string) =>
+    onUpdate({ [field]: filter[field].filter((v) => v !== dropped) });
+
+  // Grouped by type, in the order the types are listed.
+  const rules = RULE_TYPES.flatMap(({ field, label }) =>
+    filter[field].map((v) => ({ field, label, value: v }))
+  );
+
   return (
-    <div className="chip-field">
-      <div className="chip-head">
-        <span className="chip-label">{label}</span>
-        <span className="chip-hint">{hint}</span>
-      </div>
-      {values.length > 0 && (
-        <ul className="chips">
-          {values.map((v) => (
-            <li className="chip" key={v}>
-              <span className="chip-text">{v}</span>
+    <>
+      <ul className="rules">
+        {rules.length === 0 ? (
+          <li className="rules-empty">No rules yet.</li>
+        ) : (
+          rules.map((rule) => (
+            <li className="rule" key={`${rule.field}:${rule.value}`}>
+              <span className="rule-type">{rule.label}</span>
+              <span className="rule-value">{rule.value}</span>
               <button
-                className="chip-x"
-                onClick={() => onChange(values.filter((x) => x !== v))}
-                aria-label={`Remove ${v}`}
-                title={`Remove ${v}`}
+                className="rule-x"
+                onClick={() => remove(rule.field, rule.value)}
+                aria-label={`Remove rule ${rule.label} ${rule.value}`}
+                title="Remove rule"
               >
                 ✕
               </button>
             </li>
-          ))}
-        </ul>
-      )}
+          ))
+        )}
+      </ul>
+
       <form
-        className="chip-add"
+        className="rule-add"
         onSubmit={(e) => {
           e.preventDefault();
           add();
         }}
       >
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value as FilterField)}
+          aria-label="Rule type"
+        >
+          {RULE_TYPES.map((t) => (
+            <option key={t.field} value={t.field}>
+              {t.label}
+            </option>
+          ))}
+        </select>
         <input
           type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={placeholder}
-          aria-label={`Add to ${label}`}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={spec.placeholder}
+          aria-label="Rule value"
           autoCapitalize="none"
           autoCorrect="off"
           autoComplete="off"
           spellCheck={false}
         />
         <button className="secondary" type="submit" disabled={!candidate || duplicate}>
-          Add
+          Add Rule
         </button>
       </form>
       {duplicate && <p className="hint">Already added.</p>}
-    </div>
+    </>
   );
 }
