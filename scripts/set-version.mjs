@@ -34,9 +34,9 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(next)) {
 /** Rewrites a JSON file's top-level `version` without disturbing its layout. */
 function setJsonVersion(path) {
   const text = readFileSync(path, "utf8");
-  const updated = text.replace(/("version"\s*:\s*)"[^"]*"/, `$1"${next}"`);
-  if (updated === text) throw new Error(`No version field in ${path}`);
-  writeFileSync(path, updated);
+  const pattern = /("version"\s*:\s*)"[^"]*"/;
+  if (!pattern.test(text)) throw new Error(`No version field in ${path}`);
+  writeFileSync(path, text.replace(pattern, `$1"${next}"`));
 }
 
 setJsonVersion(paths.pkg);
@@ -44,11 +44,8 @@ setJsonVersion(paths.conf);
 
 // Cargo.toml: only the version in the [package] table, not a dependency's.
 const cargo = readFileSync(paths.cargo, "utf8");
-const updatedCargo = cargo.replace(
-  /(\[package\][^[]*?\nversion\s*=\s*)"[^"]*"/,
-  `$1"${next}"`
-);
-if (updatedCargo === cargo) throw new Error("No [package] version in Cargo.toml");
-writeFileSync(paths.cargo, updatedCargo);
+const cargoPattern = /(\[package\][^[]*?\nversion\s*=\s*)"[^"]*"/;
+if (!cargoPattern.test(cargo)) throw new Error("No [package] version in Cargo.toml");
+writeFileSync(paths.cargo, cargo.replace(cargoPattern, `$1"${next}"`));
 
 console.log(`Version ${current} -> ${next}`);
