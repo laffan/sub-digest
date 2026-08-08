@@ -2,6 +2,7 @@ mod anthropic;
 mod gmail;
 mod log;
 mod oauth;
+mod print;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -32,6 +33,7 @@ pub fn run() {
             gmail::gmail_get_body,
             gmail::fetch_image,
             gmail::save_file,
+            print::print_file,
             anthropic::anthropic_test,
             anthropic::anthropic_process,
         ])

@@ -113,14 +113,42 @@ export function FilterEditorModal({ filters, hasKey, onChange, onClose }: Props)
                   <RuleList filter={f} onUpdate={(patch) => update(f.id, patch)} />
 
                   <div className="filter-agent">
-                    <label className="check inline agent-toggle">
-                      <input
-                        type="checkbox"
-                        checked={f.useAgent}
-                        onChange={(e) => update(f.id, { useAgent: e.target.checked })}
-                      />
-                      Retrieve Links with AI agent
-                    </label>
+                    <div className="filter-toggles">
+                      <label className="check inline agent-toggle">
+                        <input
+                          type="checkbox"
+                          checked={f.useAgent}
+                          onChange={(e) => update(f.id, { useAgent: e.target.checked })}
+                        />
+                        Retrieve Links with AI agent
+                      </label>
+                      <label className="check inline agent-toggle">
+                        <input
+                          type="checkbox"
+                          checked={f.rememberRemovals}
+                          onChange={(e) => update(f.id, { rememberRemovals: e.target.checked })}
+                        />
+                        Remember removed content
+                      </label>
+                    </div>
+
+                    {f.rememberRemovals && (
+                      <p className="hint remembered">
+                        {f.removedSignatures.length === 0
+                          ? "What you take out of this filter's posts is taken out of its later ones too."
+                          : `Removing ${f.removedSignatures.length} remembered element${
+                              f.removedSignatures.length === 1 ? "" : "s"
+                            } from this filter's posts.`}
+                        {f.removedSignatures.length > 0 && (
+                          <button
+                            className="link"
+                            onClick={() => update(f.id, { removedSignatures: [] })}
+                          >
+                            Forget them
+                          </button>
+                        )}
+                      </p>
+                    )}
 
                     {f.useAgent && (
                       <>

@@ -13,7 +13,15 @@ import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
 import { anthropicProcess } from "./anthropic";
 import { clearProcessed, loadProcessed, markProcessed } from "./processed";
-import { FILTERS_KEY, activeFilters, decidingFilter, filterLabel, loadFilters } from "./filters";
+import {
+  FILTERS_KEY,
+  activeFilters,
+  decidingFilter,
+  filterFingerprint,
+  filterLabel,
+  loadFilters,
+} from "./filters";
+import { blockSignature, rememberedKeys, withSignatures } from "./remember";
 import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
@@ -22,6 +30,7 @@ import {
   gmailGetBody,
   gmailSearch,
   gmailStatus,
+  printDocument,
   publicationFromHeader,
   saveFile,
 } from "./gmail";
@@ -34,6 +43,7 @@ import {
   DEFAULT_SETTINGS,
   blockKey,
   outputFileName,
+  parseBlockKey,
   withRemovals,
   type DateRange,
   type DigestPost,
@@ -45,6 +55,16 @@ import {
 
 const SETTINGS_KEY = "subdigest.settings";
 const ANTHROPIC_KEY = "subdigest.anthropicKey";
+
+/** Document bytes as base64, which is how they cross into the backend. */
+function toBase64(bytes: Uint8Array): string {
+  let bin = "";
+  const chunk = 0x8000; // one apply() per chunk, or the argument list overflows
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
 
 function loadSettings(): LayoutSettings {
   try {
@@ -97,6 +117,9 @@ export default function App() {
   // Bumped on every click in the running order, so clicking the same row twice
   // scrolls to it twice.
   const [focus, setFocus] = useState<{ id: string; n: number } | null>(null);
+  // Bumped when something is clicked out of the generated document, which asks
+  // for it to be laid out again.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   // Posts processed before this session began. It's a snapshot on purpose: a
   // post read a minute ago shouldn't grey out under the user mid-run, so
@@ -154,13 +177,22 @@ export default function App() {
   }, [settings.format]);
 
   // A filter decides how the mail it found is read, so a changed filter makes
-  // every cached entry stale.
+  // every cached entry stale — but only a change to what it *finds and reads*.
+  // Remembering one more struck-out image mustn't cost another agent run.
+  const scanFingerprint = useMemo(() => filterFingerprint(filters), [filters]);
   useEffect(() => {
     entryCache.current.clear();
-  }, [filters, anthropicKey]);
+  }, [scanFingerprint, anthropicKey]);
 
-  // Striking material out changes what a generated document would contain.
+  // Striking material out changes what a generated document would contain —
+  // except when the mark came from a click on the document itself, which
+  // regenerates it rather than throwing it away.
+  const keepPreview = useRef(false);
   useEffect(() => {
+    if (keepPreview.current) {
+      keepPreview.current = false;
+      return;
+    }
     setOutput(null);
   }, [removed]);
 
@@ -306,16 +338,24 @@ export default function App() {
           bodyCache.current.set(p.id, body);
           logInfo("gmail", `Fetched "${p.subject}" (${body.length} chars)`);
         }
+        // The filter that found this post decides how it's read — and it's the
+        // filter that remembers what gets struck out of it.
+        const agent = decidingFilter(filters, p.filterIds);
         /** The email itself as one entry — the fallback whenever no agent runs. */
         const asPost = (): DigestPost[] => {
           const isHtml = /<\/?[a-z][\s\S]*>/i.test(body!.slice(0, 500));
           const blocks = isHtml ? parseEmailHtml(body!, p.subject) : parsePlainText(body!);
           return [
-            { id: p.id, publication: p.publication, title: p.subject, dateMs: p.dateMs, blocks },
+            {
+              id: p.id,
+              publication: p.publication,
+              filterId: agent?.id,
+              title: p.subject,
+              dateMs: p.dateMs,
+              blocks,
+            },
           ];
         };
-        // The filter that found this post decides how it's read.
-        const agent = decidingFilter(filters, p.filterIds);
         let entries = entryCache.current.get(p.id);
         if (entries === undefined) {
           if (agent?.useAgent && anthropicKey.trim()) {
@@ -332,6 +372,7 @@ export default function App() {
               entries = found.map((entry, n) => ({
                 id: `${p.id}#${n}`,
                 publication: p.publication,
+                filterId: agent.id,
                 title: entry.title,
                 author: entry.author || undefined,
                 sourceUrl: entry.url,
@@ -364,6 +405,16 @@ export default function App() {
         }
         const ready = entries;
         setPrepared((prev) => [...prev, ...ready]);
+        // Anything this filter has been told to remove before comes out again.
+        const already = agent ? rememberedKeys(ready, agent) : [];
+        if (already.length > 0) {
+          setRemoved((prev) => new Set([...prev, ...already]));
+          logInfo(
+            "render",
+            `Removed ${already.length} remembered element${already.length === 1 ? "" : "s"} ` +
+              `from "${p.subject}"`
+          );
+        }
         setPrepareDone(i + 1);
         setProcessedCount(markProcessed([p.id]));
       }
@@ -390,25 +441,70 @@ export default function App() {
     setOutput(null);
   }, []);
 
-  /** Marks blocks struck out, or takes the marks back when `remove` is false. */
-  const markRemoved = useCallback((keys: string[], remove: boolean) => {
-    if (keys.length === 0) return;
-    setRemoved((prev) => {
-      const next = new Set(prev);
-      for (const key of keys) {
-        if (remove) next.add(key);
-        else next.delete(key);
-      }
-      return next;
-    });
-  }, []);
+  const postsById = useMemo(() => new Map(prepared.map((p) => [p.id, p])), [prepared]);
 
-  const restoreAll = useCallback(() => setRemoved(new Set()), []);
+  /**
+   * Tells the filters what was struck out of their mail, for the ones set to
+   * remember it. Putting something back is the other half of the bargain: the
+   * filter forgets it, so it stops coming out of next week's post.
+   */
+  const rememberMarks = useCallback(
+    (keys: string[], remove: boolean) => {
+      const byFilter = new Map<string, string[]>();
+      for (const key of keys) {
+        const parsed = parseBlockKey(key);
+        if (!parsed) continue;
+        const post = postsById.get(parsed.postId);
+        if (!post?.filterId) continue;
+        const block = post.blocks[parsed.index];
+        const signature = block && blockSignature(block);
+        if (!signature) continue;
+        const known = byFilter.get(post.filterId);
+        if (known) known.push(signature);
+        else byFilter.set(post.filterId, [signature]);
+      }
+      if (byFilter.size === 0) return;
+      setFilters((fs) =>
+        fs.map((f) => {
+          const signatures = byFilter.get(f.id);
+          return signatures && f.rememberRemovals ? withSignatures(f, signatures, remove) : f;
+        })
+      );
+    },
+    [postsById]
+  );
+
+  /** Marks blocks struck out, or takes the marks back when `remove` is false. */
+  const markRemoved = useCallback(
+    (keys: string[], remove: boolean) => {
+      if (keys.length === 0) return;
+      setRemoved((prev) => {
+        const next = new Set(prev);
+        for (const key of keys) {
+          if (remove) next.add(key);
+          else next.delete(key);
+        }
+        return next;
+      });
+      rememberMarks(keys, remove);
+    },
+    [rememberMarks]
+  );
+
+  const restoreAll = useCallback(() => {
+    // Everything on screen is wanted after all, so nothing here is remembered.
+    rememberMarks([...removed], false);
+    setRemoved(new Set());
+  }, [removed, rememberMarks]);
 
   /**
    * Takes a whole article out of the output, or puts it back. It's the same
    * marking the strike-out tool does, applied to every block at once, so the
    * entry reads as struck out in the preview too and nothing is really gone.
+   *
+   * A filter that remembers removals doesn't learn from this one: dropping an
+   * article is about this digest, and teaching it every paragraph of a piece
+   * would be a filter that remembers an article rather than its furniture.
    */
   const toggleEntryRemoved = useCallback((post: DigestPost) => {
     setRemoved((prev) => {
@@ -434,7 +530,12 @@ export default function App() {
   const forOutput = useMemo(() => withRemovals(prepared, removed), [prepared, removed]);
 
   const generate = useCallback(async () => {
-    if (forOutput.length === 0) return;
+    // Only reachable by clicking the last of the content out of the document
+    // itself; the button is disabled with nothing to lay out.
+    if (forOutput.length === 0) {
+      setOutput(null);
+      return;
+    }
     setError(null);
     setGenerating(true);
     const startedAt = Date.now();
@@ -451,7 +552,8 @@ export default function App() {
       if (settings.format === "epub") {
         setOutput(await generateEpub(forOutput, settings, report));
       } else {
-        setOutput({ format: "pdf", bytes: await generatePdf(forOutput, settings, report) });
+        const { bytes, placements } = await generatePdf(forOutput, settings, report);
+        setOutput({ format: "pdf", bytes, placements });
       }
       setProgress("");
       logInfo("render", `Done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
@@ -462,6 +564,33 @@ export default function App() {
     }
   }, [forOutput, prepared.length, removed.size, settings, report, fail]);
 
+  // Regenerating after a click on the document itself. The generate callback is
+  // rebuilt whenever the content changes, so it's read from a ref: the tick and
+  // the removal land in the same render, and this fires with the new one.
+  const generateRef = useRef(generate);
+  useEffect(() => {
+    generateRef.current = generate;
+  });
+  useEffect(() => {
+    if (refreshTick > 0) void generateRef.current();
+  }, [refreshTick]);
+
+  /**
+   * Takes the block a reader clicked in the generated PDF out of the digest and
+   * lays the document out again. The previous one stays on screen meanwhile, so
+   * the page doesn't vanish from under the click that changed it.
+   */
+  const removeFromOutput = useCallback(
+    (key: string) => {
+      if (generating) return;
+      keepPreview.current = true;
+      markRemoved([key], true);
+      setRefreshTick((n) => n + 1);
+      logInfo("render", "Removed an element from the page; laying the digest out again");
+    },
+    [generating, markRemoved]
+  );
+
   const exportOutput = useCallback(async () => {
     if (!output) return;
     const ext = output.format;
@@ -470,18 +599,27 @@ export default function App() {
       filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
     });
     if (!path) return;
-    let bin = "";
-    const chunk = 0x8000;
-    for (let i = 0; i < output.bytes.length; i += chunk) {
-      bin += String.fromCharCode(...output.bytes.subarray(i, i + chunk));
-    }
     try {
-      await saveFile(path, btoa(bin));
+      await saveFile(path, toBase64(output.bytes));
       logInfo("save", `Wrote ${output.bytes.length.toLocaleString()} bytes to ${path}`);
     } catch (e) {
       fail("save", e);
     }
   }, [output, fail]);
+
+  /** Hands the finished PDF to the system's own print dialog. */
+  const printOutput = useCallback(async () => {
+    if (output?.format !== "pdf") return;
+    setError(null);
+    report("Sending it to the printer…");
+    try {
+      logInfo("print", await printDocument(outputFileName("pdf"), toBase64(output.bytes)));
+    } catch (e) {
+      fail("print", e);
+    } finally {
+      setProgress("");
+    }
+  }, [output, report, fail]);
 
   return (
     <div className={`app${showLog ? " with-log" : ""}`}>
@@ -614,9 +752,16 @@ export default function App() {
                 {generating ? "Generating…" : `Generate ${settings.format.toUpperCase()}`}
               </button>
               {output && !generating && (
-                <button className="secondary" onClick={exportOutput}>
-                  {`Save ${output.format.toUpperCase()}…`}
-                </button>
+                <div className="output-actions">
+                  <button className="secondary" onClick={exportOutput}>
+                    {`Save ${output.format.toUpperCase()}…`}
+                  </button>
+                  {output.format === "pdf" && (
+                    <button className="secondary" onClick={printOutput} title="Print this digest">
+                      Print…
+                    </button>
+                  )}
+                </div>
               )}
               {progress && <div className="progress">{progress}</div>}
               {error && <div className="error">{error}</div>}
@@ -636,7 +781,7 @@ export default function App() {
             onMark={markRemoved}
           />
         ) : (
-          <Preview output={output} />
+          <Preview output={output} busy={generating} onRemoveBlock={removeFromOutput} />
         )}
       </main>
 

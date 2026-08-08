@@ -47,6 +47,18 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    marked `agent` in the scan list, and so are agentic filters in the Filters
    popup.
 
+   Beside that sits *Remember removed content*. A newsletter is mostly the
+   same furniture every week — the masthead image, the standing sign-off, the
+   promo that runs every issue — and with this on, whatever you take out of
+   one of this filter's posts is taken out of its later ones too. What's
+   remembered is the thing itself, not the markup around it: a picture by its
+   address (CDN resizing wrappers unwrapped, so the same image at another
+   width still counts), a paragraph by its words. Put something back and the
+   filter forgets it, so it stops coming out. Dropping a whole article with
+   the trash teaches it nothing — that's about this digest, not about the
+   publication. The editor says how many things a filter is remembering, with
+   a **Forget them** to wipe the lot.
+
    Filters live on the device. An install that predates them carries its
    sender domains across as one filter, and each publication it had the
    agent switched on for becomes its own agentic filter — Gmail's `from:`
@@ -79,7 +91,9 @@ little magazine of your recent reading — or an EPUB for your e-reader.
 
    - **PDF** — a custom layout engine flows the posts (publication name, title,
      date, and body text) into fixed pages. An image is a block of its own,
-     across the column, with text above and below it and never beside it. An optional
+     with text above and below it and never beside it, and it prints at its own
+     size — a small picture stays a small picture rather than being blown up to
+     the measure. Only one wider than the column is scaled down to fit it. An optional
      cover carries a table of contents listing **every** post — title,
      publication, date and page number, running onto further contents pages
      when one isn't enough — and each entry is a clickable link to the page the
@@ -110,19 +124,34 @@ three steps in order, each with a link back:
    right as each post is read — images and all, fetched as you scroll to them —
    so you can see what was actually captured before generating anything.
 
-   Two ways to take material out, both provisional. The **trash** on a row
-   removes that whole article. **Remove content** turns the pointer into a
-   crosshair: drag across the preview and the material you cover is marked —
-   hold **⌥** while dragging to put it back. Either way what's removed turns
-   red rather than disappearing, so it's still there and still yours to
-   adjust; **Restore** clears every mark at once. An entry with nothing left
-   drops from the digest, and its row says so. Nothing is deleted, so stepping
-   back here from Output finds every mark where you left it.
-3. **Output** — format and its settings, then Generate.
+   Three ways to take material out, all provisional. The **trash** on a row
+   removes that whole article. Every element in the preview carries a **✕**
+   under the pointer, which takes out just that one — the only practical way to
+   drop a single picture, and it needs no tool armed. **Remove content** turns
+   the pointer into a crosshair for the rest: drag across the preview and the
+   material you cover is marked — hold **⌥** while dragging to put it back. Any
+   of them and what's removed turns red rather than disappearing, so it's still
+   there and still yours to adjust; **Restore** clears every mark at once. An
+   entry with nothing left drops from the digest, and its row says so. Nothing
+   is deleted, so stepping back here from Output finds every mark where you
+   left it.
+3. **Output** — format and its settings, then Generate. **Save PDF…** writes
+   the file; **Print…** hands it straight to the system's print dialog, which
+   is where the paper size and the double-sided setting a folded booklet needs
+   actually live.
 
 A selection can't change under a run that's already going. The preview on the
 right shows the real generated PDF, or the EPUB's own markup and stylesheet for
 e-books.
+
+A PDF preview is the finished document and stays editable: a rail of page
+thumbnails runs down the left, and clicking one scrolls the pages to it, while
+**clicking anything on a page itself** — a picture, a paragraph, a heading —
+takes that element out of the digest and lays the document out again. The
+previous version stays on screen while it does, so the page doesn't vanish from
+under the click that changed it. Those removals are the same marks the Organize
+step makes, so stepping back finds them there, and a filter set to remember
+them will have done.
 
 The **log** button next to the gear opens a pane across the foot of the window:
 Gmail queries and match counts, every generation step, and the agent's own
@@ -259,7 +288,10 @@ Three iOS-specific setup steps (done once, on the Mac):
    `com.googleusercontent.apps.<your-ios-client-id>`.
 
 3. **"Save PDF…" / "Save EPUB…"** uses `tauri-plugin-dialog`, which presents
-   the iOS document picker — no extra work.
+   the iOS document picker — no extra work. **Print…** is desktop only: it
+   drives the platform's print flow through a command line, which iOS has no
+   equivalent of, so on an iPad it says so and you print the saved file from
+   Files instead.
 
 The loopback flow still works in the **iPad simulator**, so you can develop the
 whole app there before wiring the iOS client for on-device/TestFlight builds.
@@ -320,7 +352,7 @@ Two things worth knowing about what comes out:
 | Gmail OAuth (PKCE) | `src-tauri/src/oauth.rs` | Shared PKCE/token core + desktop loopback flow (fixed 127.0.0.1 port) |
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
-| Mail filters | `src/filters.ts`, `src/components/FilterEditorModal.tsx` | The saved filters — what to find and whether the agent reads it — their storage, and the migration from the sender-domain list and per-publication agent settings that came before. Values are normalized on the way in: a pasted `https://ghost.io/blog` becomes `ghost.io`, `Nate <news@example.com>` becomes the address, and a sender's *name* keeps its spaces and capitals, since Gmail matches those too and it's read back in the editor |
+| Mail filters | `src/filters.ts`, `src/components/FilterEditorModal.tsx` | The saved filters — what to find, whether the agent reads it, and what it remembers taking out of it — their storage, and the migration from the sender-domain list and per-publication agent settings that came before. Values are normalized on the way in: a pasted `https://ghost.io/blog` becomes `ghost.io`, `Nate <news@example.com>` becomes the address, and a sender's *name* keeps its spaces and capitals, since Gmail matches those too and it's read back in the editor |
 | Filters → Gmail queries | `src-tauri/src/gmail.rs` | Domains, addresses and sender names are alternatives on one `from:` (no message is from two senders); subject slices become `subject:("…" OR "…")`, search terms bare phrases, and the kinds are ANDed. Each **enabled filter runs as its own query** rather than one big OR — a search term matches the body, so which filter caught a message can't be worked out from its headers afterwards, and every message has to come back knowing. Ids are unioned first and headers fetched once, so a message two filters found still costs one metadata request. Quotes are what delimits a phrase, so they're stripped from the text rather than escaped, and a `from:` operand that would need quoting is dropped instead — a filter can't break out of its own query. Unit-tested |
 | Which filter reads a post | `src/filters.ts` (`decidingFilter`) | A message can match several filters, and one of them has to decide whether the agent runs. An agentic filter wins — carving the roundups out with a filter of their own is exactly what one is for, so it shouldn't lose to the broad filter that happens to catch them too — and otherwise it's the first in the user's own order. The scan list applies the same rule up front, so the `agent` marks there are what a run will actually do |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
@@ -328,12 +360,15 @@ Two things worth knowing about what comes out:
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |
 | Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists as lists, quotes as quotes, images as images — with nested matches emitted once. Image addresses are resolved against the page, and lazy-loaded `data-src`/`srcset` are read, so a placeholder `src` doesn't cost you the picture |
 | Body-copy detection | `src-tauri/src/anthropic.rs` | Rather than taking every readable tag on the page, it works out where the piece actually lives: each paragraph's length is credited to all its ancestors, and the **deepest** container still holding ~90% of the best score wins — which narrows `body > div > article` down to the article. Furniture (`nav`/`header`/`footer`/`aside`/`form`, `aria-hidden`, and classes made of words like `comments`, `share`, `subscription`, `sidebar`, `related`) is dropped first, so it can't win on a long comment thread. Class names are matched **word by word**, never as substrings — Substack's own article is `class="newsletter-post"`, which a substring match for "newsletter" would discard wholesale. The container it settled on is named in the log |
-| PDF layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib. Images break the column rather than sit in it: each spans the measure, keeps its aspect ratio, and starts the next column rather than run off the bottom of this one. A picture taller than 60% of the column is scaled down to that and centred, so no image takes a column on its own |
+| PDF layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib. Images break the column rather than sit in it: each is drawn at its own size (pixels read as 96 to the inch, points as 72), centred, and starts the next column rather than run off the bottom of this one. Only a picture wider than the measure is scaled down to it, and one taller than 60% of the column is capped at that, so no image takes a column on its own |
+| What's drawn where | `src/pdf/layout.ts` (`beginBlock`/`endBlock`) | The layout returns the rectangle every block occupies, which is what makes a generated page clickable. A block that flows across a column break is recorded once per column, so each part of it is its own target; an image's rectangle is narrowed to the picture, so the white beside a small one isn't a hit. The numbers are the content's own, then shifted past the front matter once its page count is known, and moved onto the sheets — offset into the right-hand slot and all — when the booklet is imposed |
 | EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
 | Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters and by the Organize preview, which shows the same re-encoded image it will print. The preview fetches lazily (`IntersectionObserver`, a screen ahead), so a hundred-image digest doesn't stall the step for pictures nobody has scrolled to |
-| Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js; EPUBs render their own markup in a sandboxed frame |
-| Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark); a row's trash marks every block of that entry at once, so both land in the same place. Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
+| Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js, twice: full size in the column, and again at 150px as a sticky rail of thumbnails that scrolls the pages when clicked. A click on a page is turned back into PDF points from the canvas's own scale and hit-tested against the placements, smallest rectangle winning, so a picture beats the column it sits in. EPUBs render their own markup in a sandboxed frame |
+| Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark); a ✕ on each block marks that one; a row's trash marks every block of that entry at once; and so does a click on the generated PDF. They all land in the same place. Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
+| Remembering removals | `src/remember.ts` | The signature a filter recognises material by, for *Remember removed content*. It's the block's own identity rather than the classes around it: a newsletter template gives every paragraph in the body the same class, so a signature made of those would take out one week's sign-off and next week's article with it. Images reduce to an address with the CDN's resizing wrapper unwrapped and the query string dropped, text to its words folded to lower case; a horizontal rule signs as nothing at all, since remembering one would quietly delete every rule in the digest. Capped at 500 per filter, oldest dropped |
+| Print | `src-tauri/src/print.rs` | Writes the PDF to the temp directory (under a bare file name — the UI doesn't get to name a path) and hands it to the platform: on macOS, Preview's own `print … with print dialog`, falling back to simply opening the file if automation is refused; `Start-Process -Verb Print` on Windows; the default viewer on Linux. Deliberately the dialog rather than a job fired at the default printer — this app makes booklets, and the duplex and paper settings are exactly what the dialog is for |
 | Reordering | `src/components/OrganizePanel.tsx` | Pointer events rather than HTML5 drag-and-drop, which touch devices don't fire — so the same code reorders under a mouse on the Mac and a finger on the iPad. A press only becomes a drag past a 4px threshold, leaving a plain click free to mean "show me this entry" |
 | Already-read marker | `src/processed.ts` | Message ids of posts that have been fetched and parsed, in `localStorage`, capped at 5,000 (oldest dropped). The set used for shading is read **once at startup**, so a post read a minute ago doesn't grey out under the user mid-run — it shows up the next time they scan. Purely cosmetic: nothing consults it to skip, filter or deselect |
 | Log | `src/log.ts`, `src-tauri/src/log.rs` | Module-level store in the UI (any layer can write without prop drilling); the backend feeds it over a Tauri `log` event |
@@ -362,6 +397,9 @@ nothing is dropped and the files stay small too.
   device, nothing more — no subjects, no content — and Settings clears it.
 - Email content and images are fetched directly from Google/Substack CDNs and
   never leave the device.
+- **Print…** writes the digest to the system temp directory so the platform's
+  print flow has a file to take, and leaves it there for the printer to finish
+  with. It never goes anywhere else.
 - The AI agent is entirely opt-in and per-filter. When a filter has it on,
   the content of the mail that filter found is sent to the Anthropic API so
   the model can name the links it recommends. Mail no agentic filter found is

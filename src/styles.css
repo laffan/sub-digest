@@ -40,10 +40,14 @@ body {
   grid-template-columns: 320px 1fr;
   grid-template-rows: 1fr;
   height: 100vh;
+  /* How much of the window the working area gets — what a preview pane has to
+     fit into. The log takes a slice off the bottom when it's open. */
+  --viewport-h: 100vh;
 }
 
 .app.with-log {
   grid-template-rows: 1fr auto;
+  --viewport-h: 70vh;
 }
 
 .col {
@@ -129,6 +133,16 @@ body {
 .step-actions .error,
 .step-actions .progress {
   margin-bottom: 0;
+}
+
+/* Save and Print share the row under Generate. */
+.output-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.output-actions .secondary {
+  flex: 1;
 }
 
 .brand {
@@ -457,11 +471,26 @@ label.check.inline {
   flex: none;
 }
 
-/* Whether this filter's mail goes to the agent, and what it should take. */
+/* Whether this filter's mail goes to the agent, and what it should take —
+   and whether it remembers what gets struck out of it. */
 .filter-agent {
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
+}
+
+.filter-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 20px;
+}
+
+.hint.remembered {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
 }
 
 label.check.inline.agent-toggle {
@@ -1083,11 +1112,87 @@ label.check {
   font-size: 12px;
 }
 
+.preview-hint {
+  text-align: center;
+  margin: 0 0 12px;
+}
+
+/* A rail of page thumbnails beside the pages themselves. The rail stretches to
+   the height of the pages column — without something taller than itself to sit
+   in, a sticky element has nowhere to stick. */
+.pdf-preview {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 20px;
+  align-items: stretch;
+}
+
+/* The column scrolls, so the rail stays put while the pages go by. */
+.preview-thumbs {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-height: calc(var(--viewport-h) - 48px);
+  overflow-y: auto;
+  padding: 2px 4px 2px 2px;
+}
+
+.preview-thumb {
+  position: relative;
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: #fff;
+  line-height: 0;
+  cursor: pointer;
+}
+
+.preview-thumb canvas {
+  display: block;
+  border-radius: 1px;
+}
+
+.preview-thumb:hover {
+  border-color: var(--muted);
+}
+
+.preview-thumb.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.preview-thumb-num {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: 3px;
+}
+
 .preview-pages {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 18px;
+}
+
+/* Over a block the layout engine drew: a click takes it out of the digest. */
+.preview-pages.over-block {
+  cursor: pointer;
+}
+
+/* The document on screen is the previous one while the next is laid out. */
+.preview-pages.busy {
+  opacity: 0.55;
+  cursor: progress;
 }
 
 .preview-page {
@@ -1101,7 +1206,7 @@ label.check {
 .preview-epub {
   display: block;
   width: 100%;
-  height: calc(100vh - 48px);
+  height: calc(var(--viewport-h) - 48px);
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
@@ -1305,10 +1410,58 @@ label.check {
 /* Padded out and pulled back by the same amount, so a marked block reads as a
    band of colour without the text shifting when it's marked. */
 .cp-block {
+  position: relative;
   padding: 2px 7px;
   margin: 0 -7px;
   border-radius: 3px;
   transition: background 0.12s ease;
+}
+
+/* Takes out one element — the only practical way to remove a single picture,
+   and it needs no tool armed. Out of the way until the pointer is on the
+   block it belongs to. */
+.cp-remove {
+  position: absolute;
+  top: 2px;
+  right: -12px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.cp-block:hover .cp-remove,
+.cp-remove:focus-visible {
+  opacity: 1;
+}
+
+.cp-remove:hover {
+  color: var(--strike-ink);
+  border-color: var(--strike-edge);
+  background: var(--strike-bg);
+}
+
+.cp-block.struck .cp-remove {
+  color: var(--strike-ink);
+  border-color: var(--strike-edge);
+}
+
+/* On a touch screen there's no hover to reveal it, so it's simply there. */
+@media (pointer: coarse) {
+  .cp-remove {
+    opacity: 1;
+  }
 }
 
 /* Marked for removal — still here, still editable, just not going to print. */

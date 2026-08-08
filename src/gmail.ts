@@ -65,6 +65,15 @@ export function saveFile(path: string, bytesB64: string): Promise<void> {
   return invoke<void>("save_file", { path, bytesB64 });
 }
 
+/**
+ * Hands a generated document to the system's print flow — the OS's own print
+ * dialog, not a save-then-open detour. Resolves with a line saying what it did,
+ * since that differs by platform and belongs in the log.
+ */
+export function printDocument(fileName: string, bytesB64: string): Promise<string> {
+  return invoke<string>("print_file", { fileName, bytesB64 });
+}
+
 /** Extracts a human publication name from a From header. */
 export function publicationFromHeader(from: string): string {
   const m = from.match(/^\s*"?([^"<]+?)"?\s*<[^>]+>\s*$/);

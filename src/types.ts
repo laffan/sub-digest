@@ -67,6 +67,15 @@ export interface MailFilter {
   useAgent: boolean;
   /** What the agent should take from this filter's mail. */
   instructions: string;
+  /**
+   * Keep a signature of everything struck out of this filter's mail, and strike
+   * it out again wherever it turns up. A newsletter's furniture — the masthead
+   * image, the standing sign-off, the same promo paragraph every week — is
+   * removed once and stays removed.
+   */
+  rememberRemovals: boolean;
+  /** The signatures remembered so far; see `blockSignature` in `remember.ts`. */
+  removedSignatures: string[];
 }
 
 /** The criterion lists on a filter — everything but its id, name and state. */
@@ -141,6 +150,11 @@ export interface DigestPost {
   /** Stable across re-preparations, so removals and ordering survive a revisit. */
   id: string;
   publication: string;
+  /**
+   * The filter that decided how this entry was read — and so the filter that
+   * remembers what gets struck out of it.
+   */
+  filterId?: string;
   title: string;
   /** Who wrote it, when the newsletter named them. */
   author?: string;
@@ -160,6 +174,18 @@ export function blockKey(postId: string, index: number): string {
   return `${postId}#${index}`;
 }
 
+/**
+ * Reads a key back into the entry and block it names. An agent-processed
+ * entry's own id already carries a `#`, so the block index is what follows the
+ * *last* one.
+ */
+export function parseBlockKey(key: string): { postId: string; index: number } | null {
+  const cut = key.lastIndexOf("#");
+  if (cut <= 0) return null;
+  const index = Number(key.slice(cut + 1));
+  return Number.isInteger(index) && index >= 0 ? { postId: key.slice(0, cut), index } : null;
+}
+
 /** Drops blocks marked for removal, and any entry left with nothing in it. */
 export function withRemovals(posts: DigestPost[], removed: ReadonlySet<string>): DigestPost[] {
   if (removed.size === 0) return posts;
@@ -176,12 +202,31 @@ export interface PreparedImage {
 }
 
 /**
+ * Where one block ended up on the page, in PDF points with the origin at the
+ * foot of the page. A block that flows across a column break has one of these
+ * per column, so clicking any part of it in the preview finds it.
+ */
+export interface BlockPlacement {
+  /** The `blockKey` of the block drawn here. */
+  key: string;
+  kind: Block["kind"];
+  /** 0-based index of the page in the finished document. */
+  page: number;
+  x: number;
+  /** The rectangle's bottom edge. */
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
  * A generated digest, ready to preview and save. EPUB carries a standalone
  * HTML rendering of the book alongside the archive, since the preview pane
- * can't open the archive itself.
+ * can't open the archive itself; a PDF carries the map of what was drawn
+ * where, so the preview can turn a click into the block under it.
  */
 export type GeneratedOutput =
-  | { format: "pdf"; bytes: Uint8Array }
+  | { format: "pdf"; bytes: Uint8Array; placements: BlockPlacement[] }
   | { format: "epub"; bytes: Uint8Array; previewHtml: string };
 
 /** Default file name (sans directory) for saving a generated digest. */

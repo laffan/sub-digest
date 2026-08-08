@@ -215,6 +215,7 @@ export function OrganizePanel({
       {posts.length > 0 && (
         <p className="hint">
           Drag an entry to set where it lands in the digest; click one to find it in the preview.
+          Each element there carries a ✕ to take out just that one.
         </p>
       )}
     </section>

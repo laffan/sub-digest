@@ -77,6 +77,8 @@ export function emptyFilter(name = ""): MailFilter {
     terms: [],
     useAgent: false,
     instructions: "",
+    rememberRemovals: false,
+    removedSignatures: [],
   };
 }
 
@@ -88,6 +90,27 @@ export function filterIsEmpty(f: MailFilter): boolean {
 /** The filters a scan actually uses: enabled, and with something to match on. */
 export function activeFilters(filters: MailFilter[]): MailFilter[] {
   return filters.filter((f) => f.enabled && !filterIsEmpty(f));
+}
+
+/**
+ * What the filters amount to as far as *finding and reading* mail goes —
+ * everything except the memory of what's been struck out of them. Prepared
+ * entries go stale when this changes; remembering one more removed image is no
+ * reason to send a newsletter back to the agent.
+ */
+export function filterFingerprint(filters: MailFilter[]): string {
+  return JSON.stringify(
+    filters.map((f) => [
+      f.id,
+      f.enabled,
+      f.domains,
+      f.senders,
+      f.subjects,
+      f.terms,
+      f.useAgent,
+      f.instructions,
+    ])
+  );
 }
 
 /** What to call a filter on screen when the user hasn't named it. */
@@ -139,6 +162,8 @@ function coerceFilter(value: unknown): MailFilter {
     terms: stringList(f.terms),
     useAgent: f.useAgent === true,
     instructions: typeof f.instructions === "string" ? f.instructions : "",
+    rememberRemovals: f.rememberRemovals === true,
+    removedSignatures: stringList(f.removedSignatures),
   };
 }
 

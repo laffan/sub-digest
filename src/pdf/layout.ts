@@ -12,8 +12,10 @@ import {
   type RGB,
 } from "pdf-lib";
 import {
+  blockKey,
   byline,
   type Block,
+  type BlockPlacement,
   type DigestPost,
   type LayoutSettings,
   type PageSizeName,
@@ -23,6 +25,11 @@ import { prepareImage } from "../images";
 import { dateRangeLabel, formatLongDate } from "../dates";
 
 const MM = 72 / 25.4; // millimetres → points
+/**
+ * An image's pixels are CSS pixels, which the web calls 96 to the inch; a PDF
+ * point is a 72nd. So this is what "actual size" means on the page.
+ */
+const PX = 72 / 96;
 
 const PAGE_SIZES: Record<PageSizeName, [number, number]> = {
   A5: [419.53, 595.28],
@@ -37,6 +44,17 @@ interface FontSet {
   italic: PDFFont;
 }
 
+/** The block currently being drawn, and where its run down this column began. */
+interface OpenBlock {
+  key: string;
+  kind: Block["kind"];
+  /** 1-based page number within the content, before front matter is inserted. */
+  page: number;
+  x: number;
+  width: number;
+  top: number;
+}
+
 const INK = rgb(0.1, 0.1, 0.12);
 const MUTED = rgb(0.42, 0.42, 0.46);
 const RULE = rgb(0.75, 0.75, 0.78);
@@ -45,15 +63,23 @@ export interface GenerateProgress {
   (message: string): void;
 }
 
+/** The finished document, and the map of what was drawn where inside it. */
+export interface GeneratedPdf {
+  bytes: Uint8Array;
+  placements: BlockPlacement[];
+}
+
 /**
  * Lays selected posts out chronologically into a PDF. Returns the finished
- * document bytes (after optional saddle-stitch imposition).
+ * document bytes (after optional saddle-stitch imposition) along with the
+ * rectangle every block occupies, so the preview can turn a click on the page
+ * into the block underneath it.
  */
 export async function generatePdf(
   posts: DigestPost[],
   settings: LayoutSettings,
   onProgress: GenerateProgress
-): Promise<Uint8Array> {
+): Promise<GeneratedPdf> {
   // The caller's order is the running order — the Organize step sets it, and
   // it starts out chronological.
   const sorted = posts;
@@ -78,15 +104,17 @@ export async function generatePdf(
 
   flow.drawFooters(sorted);
 
-  if (settings.coverPage && sorted.length > 0) {
-    drawFrontMatter(doc, flow, toc, sorted);
-  }
+  const front =
+    settings.coverPage && sorted.length > 0 ? drawFrontMatter(doc, flow, toc, sorted) : 0;
+  // Placements are recorded against the content's own page numbering; the front
+  // matter goes in ahead of it, so everything shifts down by that many pages.
+  const placements = flow.placements.map((p) => ({ ...p, page: p.page - 1 + front }));
 
   if (settings.bookletImposition) {
     onProgress("Imposing booklet sheets…");
-    return imposeBooklet(await doc.save(), title);
+    return imposeBooklet(await doc.save(), title, placements);
   }
-  return doc.save();
+  return { bytes: await doc.save(), placements };
 }
 
 async function embedFonts(doc: PDFDocument, s: LayoutSettings): Promise<FontSet> {
@@ -123,6 +151,11 @@ class Flow {
   y = 0;
   private started = false;
   private pagesAdded = 0;
+
+  /** Where each block was drawn, filled in as the flow moves down the page. */
+  readonly placements: BlockPlacement[] = [];
+  /** The block being drawn: which one, and where its current run started. */
+  private open: OpenBlock | null = null;
 
   constructor(
     private doc: PDFDocument,
@@ -165,10 +198,12 @@ class Flow {
   }
 
   addPage() {
+    const carried = this.closeRun();
     this.page = this.doc.addPage([this.pageW, this.pageH]);
     this.pagesAdded += 1;
     this.col = 0;
     this.y = this.pageH - this.mTop;
+    this.resumeRun(carried);
   }
 
   /** 1-based number of the page currently being drawn. */
@@ -179,11 +214,72 @@ class Flow {
   nextColumn() {
     this.ensureStarted();
     if (this.col + 1 < this.cols) {
+      const carried = this.closeRun();
       this.col += 1;
       this.y = this.pageH - this.mTop;
+      this.resumeRun(carried);
     } else {
       this.addPage();
     }
+  }
+
+  /**
+   * Starts recording where a block is drawn. A block that flows across a
+   * column break is recorded once per column, so every part of it is a click
+   * target in the preview.
+   */
+  beginBlock(key: string, kind: Block["kind"]) {
+    this.ensureStarted();
+    this.endBlock();
+    this.open = {
+      key,
+      kind,
+      page: this.pagesAdded,
+      x: this.colX,
+      width: this.colW,
+      top: this.y,
+    };
+  }
+
+  endBlock() {
+    this.closeRun();
+    this.open = null;
+  }
+
+  /**
+   * Narrows the open block to what was actually drawn. An image at its own
+   * size leaves white on either side of it, and clicking that white shouldn't
+   * take the picture out.
+   */
+  private fitOpenTo(x: number, width: number) {
+    if (this.open) this.open = { ...this.open, x, width };
+  }
+
+  /** Banks the run of the open block that ends here, and hands it back. */
+  private closeRun(): OpenBlock | null {
+    const open = this.open;
+    if (!open) return null;
+    const height = open.top - this.y;
+    // A block pushed to the next column before anything was drawn leaves an
+    // empty run behind; there's nothing there to click.
+    if (height > 0.5) {
+      this.placements.push({
+        key: open.key,
+        kind: open.kind,
+        page: open.page,
+        x: open.x,
+        y: this.y,
+        width: open.width,
+        height,
+      });
+    }
+    return open;
+  }
+
+  /** Picks the open block back up at the top of the new column. */
+  private resumeRun(carried: OpenBlock | null) {
+    if (!carried) return;
+    this.open = { ...carried, page: this.pagesAdded, x: this.colX, width: this.colW, top: this.y };
   }
 
   /** Moves to the next column/page unless `height` points fit here. */
@@ -212,13 +308,14 @@ class Flow {
 
   /**
    * Draws an image as a block of its own: text runs above and below it, never
-   * beside it. It spans the column, unless holding its aspect ratio within the
-   * height cap makes it narrower, in which case it's centred. Advances y past
-   * the image.
+   * beside it. It's drawn at its own size and centred in the column — a small
+   * picture stays a small picture rather than being blown up to the measure —
+   * and only shrinks when it wouldn't otherwise fit the column's width, or is
+   * tall enough to take the column on its own. Advances y past the image.
    */
   placeImage(pdfImage: PDFImage, img: PreparedImage) {
     this.ensureStarted();
-    let w = this.colW;
+    let w = Math.min(img.width * PX, this.colW);
     let h = (img.height / img.width) * w;
     // A tall picture would otherwise take the column on its own; cap it so
     // there's room for text above and below it.
@@ -231,6 +328,8 @@ class Flow {
     // rather than running off the bottom of this one.
     this.fit(h);
     const x = this.colX + (this.colW - w) / 2;
+    // …and after `fit`, since moving column resets the run to the full measure.
+    this.fitOpenTo(x, w);
     this.page.drawImage(pdfImage, { x, y: this.y - h, width: w, height: h });
     this.advance(h);
   }
@@ -483,8 +582,13 @@ async function layoutPost(flow: Flow, post: DigestPost, s: LayoutSettings): Prom
     });
   }
 
-  for (const block of post.blocks) {
+  // Each block is drawn under its own key, so the preview can tell what a
+  // click on the finished page landed on.
+  for (let i = 0; i < post.blocks.length; i++) {
+    const block = post.blocks[i];
+    flow.beginBlock(blockKey(post.id, i), block.kind);
     await layoutBlock(flow, block, s);
+    flow.endBlock();
   }
   return startPage;
 }
@@ -597,9 +701,15 @@ interface PendingLink {
 /**
  * Draws the front matter ahead of the content: a masthead, then a table of
  * contents listing *every* post — continuing onto as many pages as it needs —
- * with each entry a clickable link to the page the post starts on.
+ * with each entry a clickable link to the page the post starts on. Returns how
+ * many pages it took, which is what the content is now offset by.
  */
-function drawFrontMatter(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: DigestPost[]) {
+function drawFrontMatter(
+  doc: PDFDocument,
+  flow: Flow,
+  toc: TocEntry[],
+  posts: DigestPost[]
+): number {
   const { pageW, pageH, fonts } = flow;
   const margin = Math.max(pageW * 0.09, 34);
   const width = pageW - margin * 2;
@@ -725,6 +835,7 @@ function drawFrontMatter(doc: PDFDocument, flow: Flow, toc: TocEntry[], posts: D
   for (const link of links) {
     addInternalLink(doc, link.page, link.rect, doc.getPage(frontCount + link.target - 1));
   }
+  return frontCount;
 }
 
 /** Turns `rect` on `page` into a click target that jumps to `target`'s top. */
@@ -779,9 +890,15 @@ function truncateToWidth(text: string, font: PDFFont, size: number, width: numbe
 
 /**
  * Reorders pages onto double-width sheets so that printing double-sided
- * (flip on short edge) and folding the stack in half yields a booklet.
+ * (flip on short edge) and folding the stack in half yields a booklet. The
+ * block placements move with their pages, so clicking one on an imposed sheet
+ * still finds it.
  */
-async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<Uint8Array> {
+async function imposeBooklet(
+  contentBytes: Uint8Array,
+  title: string,
+  placements: BlockPlacement[]
+): Promise<GeneratedPdf> {
   const src = await PDFDocument.load(contentBytes);
   const n = Math.ceil(src.getPageCount() / 4) * 4;
   const out = await PDFDocument.create();
@@ -789,12 +906,13 @@ async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<U
 
   const [pw, ph] = [src.getPage(0).getWidth(), src.getPage(0).getHeight()];
   const embedded = await out.embedPages(src.getPages());
-  // Where each 1-based source page ended up, so its links can be re-created.
-  const placed = new Map<number, { sheet: PDFPage; slot: 0 | 1 }>();
-  const place = (sheet: PDFPage, pageNo: number, slot: 0 | 1) => {
+  // Where each 1-based source page ended up, so its links and placements can be
+  // re-created; `sheetNo` is the sheet's own 0-based index in the output.
+  const placed = new Map<number, { sheet: PDFPage; sheetNo: number; slot: 0 | 1 }>();
+  const place = (sheet: PDFPage, sheetNo: number, pageNo: number, slot: 0 | 1) => {
     if (pageNo > embedded.length) return; // padding blank
     sheet.drawPage(embedded[pageNo - 1], { x: slot * pw, y: 0, width: pw, height: ph });
-    placed.set(pageNo, { sheet, slot });
+    placed.set(pageNo, { sheet, sheetNo, slot });
   };
 
   // Side s (1-indexed): odd sides put the high page on the left
@@ -803,16 +921,20 @@ async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<U
     const high = n - (s2 - 1);
     const low = s2;
     if (s2 % 2 === 1) {
-      place(sheet, high, 0);
-      place(sheet, low, 1);
+      place(sheet, s2 - 1, high, 0);
+      place(sheet, s2 - 1, low, 1);
     } else {
-      place(sheet, low, 0);
-      place(sheet, high, 1);
+      place(sheet, s2 - 1, low, 0);
+      place(sheet, s2 - 1, high, 1);
     }
   }
 
   reLinkImposedSheets(src, out, placed, pw, ph);
-  return out.save();
+  const moved = placements.flatMap((p) => {
+    const to = placed.get(p.page + 1);
+    return to ? [{ ...p, page: to.sheetNo, x: p.x + to.slot * pw }] : [];
+  });
+  return { bytes: await out.save(), placements: moved };
 }
 
 /**
@@ -824,7 +946,7 @@ async function imposeBooklet(contentBytes: Uint8Array, title: string): Promise<U
 function reLinkImposedSheets(
   src: PDFDocument,
   out: PDFDocument,
-  placed: Map<number, { sheet: PDFPage; slot: 0 | 1 }>,
+  placed: Map<number, { sheet: PDFPage; sheetNo: number; slot: 0 | 1 }>,
   pw: number,
   ph: number
 ) {

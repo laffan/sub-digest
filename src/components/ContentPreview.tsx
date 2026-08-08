@@ -41,7 +41,10 @@ const overlaps = (a: DOMRect, b: DOMRect): boolean =>
  * (and in what order) before spending time generating a document.
  *
  * It's also where material is struck out: with the tool armed, dragging across
- * a run of blocks marks them, and they turn red rather than disappearing.
+ * a run of blocks marks them, and they turn red rather than disappearing. One
+ * element at a time needs no tool at all — every block carries a ✕ under the
+ * pointer, which is how a single picture comes out.
+ *
  * Nothing is deleted here — the marks are applied on the way to the output, so
  * coming back to this step finds everything still in place to adjust.
  */
@@ -163,6 +166,7 @@ export function ContentPreview({ posts, preparing, removing, removed, focus, onM
           {post.sourceUrl && <p className="cp-source">{post.sourceUrl}</p>}
           {post.blocks.map((block, b) => {
             const key = blockKey(post.id, b);
+            const gone = removed.has(key);
             return (
               <div
                 className={`cp-block${marked(key) ? " struck" : ""}`}
@@ -170,6 +174,20 @@ export function ContentPreview({ posts, preparing, removing, removed, focus, onM
                 key={b}
               >
                 <BlockView block={block} />
+                {/* One element at a time, without arming the drag tool — which
+                    is the only practical way to take out a single picture. */}
+                <button
+                  className="cp-remove"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMark([key], !gone);
+                  }}
+                  aria-label={gone ? "Put this element back" : "Remove this element"}
+                  title={gone ? "Put this back" : "Remove this element"}
+                >
+                  {gone ? "↺" : "✕"}
+                </button>
               </div>
             );
           })}
