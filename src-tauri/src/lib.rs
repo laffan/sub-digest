@@ -1,6 +1,7 @@
 mod anthropic;
 mod gmail;
 mod log;
+mod met;
 mod oauth;
 mod print;
 
@@ -33,6 +34,7 @@ pub fn run() {
             gmail::gmail_get_body,
             gmail::fetch_image,
             gmail::save_file,
+            met::met_search,
             print::print_file,
             anthropic::anthropic_test,
             anthropic::anthropic_process,

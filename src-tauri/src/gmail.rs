@@ -131,7 +131,7 @@ pub struct PostMeta {
     filter_ids: Vec<String>,
 }
 
-fn http() -> &'static reqwest::Client {
+pub(crate) fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()

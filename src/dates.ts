@@ -28,6 +28,18 @@ export function dateRangeLabel(posts: { dateMs: number }[]): string {
   return lo === hi ? lo : `${lo} – ${hi}`;
 }
 
+/**
+ * "Jul 3 – Jul 19, 2026   ·   12 posts from 4 publications" — the line under
+ * the masthead, on the cover and on the contents page, in both formats.
+ */
+export function issueLine(posts: { publication: string; dateMs: number }[]): string {
+  const pubs = new Set(posts.map((p) => p.publication)).size;
+  return (
+    `${dateRangeLabel(posts)}   ·   ${posts.length} post${posts.length === 1 ? "" : "s"}` +
+    ` from ${pubs} publication${pubs === 1 ? "" : "s"}`
+  );
+}
+
 /** `YYYY-MM-DD`, for EPUB metadata (`dc:date`). */
 export function isoDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);

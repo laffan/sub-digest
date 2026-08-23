@@ -93,36 +93,54 @@ little magazine of your recent reading — or an EPUB for your e-reader.
      date, and body text) into fixed pages. An image is a block of its own,
      with text above and below it and never beside it, and it prints at its own
      size — a small picture stays a small picture rather than being blown up to
-     the measure. Only one wider than the column is scaled down to fit it. An optional
-     cover carries a table of contents listing **every** post — title,
-     publication, date and page number, running onto further contents pages
-     when one isn't enough — and each entry is a clickable link to the page the
-     post starts on. Then page numbers, and optional 2-up saddle-stitch
-     imposition so you can print, fold, and staple a booklet (the contents
-     links are rebuilt on the imposed sheets, so they still work). The PDF's
-     title is the date span of the included posts.
+     the measure. Only one wider than the column is scaled down to fit it. The
+     cover is the picture chosen in **Cover**, cropped to the page with the
+     masthead over the top of it, and the table of contents opens inside: one
+     page in, or two for a booklet, where the back of the cover sheet is the
+     inside cover and stays blank. It lists **every** post — title, publication,
+     date and page number, running onto further contents pages when one isn't
+     enough — each entry a clickable link to the page the post starts on, and
+     what the cover picture is at the foot of it. Then page numbers, and optional
+     2-up saddle-stitch imposition so you can print, fold, and staple a booklet
+     (the contents links are rebuilt on the imposed sheets, so they still work).
+     The PDF's title is the date span of the included posts.
    - **EPUB** — a reflowable EPUB 3 e-book, one chapter per post, with a
      navigation document (plus a legacy NCX for older readers) listing every
      post with its publication and date, so the whole digest is one tap away in
-     the reader's contents. An optional title page opens the book, followed by
-     the contents page itself. Page size, margins, columns and type size belong
+     the reader's contents. The cover picture opens the book — as the book's
+     cover image proper, so a reader shows it on the shelf as well — followed by
+     the contents, with the picture's credit at the foot of them. An e-reader
+     owns its own page shape, so the whole picture is used rather than the crop
+     the printed cover makes. Page size, margins, columns and type size belong
      to the reading device, so the e-book leaves them to it; the font family
      and line height carry over as the book's stylesheet. Text stays UTF-8, so
      emoji and CJK survive here even though the PDF drops them.
 
 The window has one working column beside the preview, and it moves through
-three steps in order, each with a link back:
+four steps in order, each with a link back:
 
 1. **Select** — the account and the discovered posts.
 2. **Organize** — every selected post is fetched and parsed here, one at a
    time, with progress at the top of the column and the running order below it.
    Each row is one entry in the digest — for agent-processed newsletters, one
    of the articles it linked to, listed under that article's title, byline and
-   address. **Drag** a row (by its grip, or from anywhere on it with a mouse)
-   to set where it lands in the digest; the order starts chronological.
-   **Clicking** a row scrolls the preview to it. The content accrues on the
-   right as each post is read — images and all, fetched as you scroll to them —
-   so you can see what was actually captured before generating anything.
+   address. **Clicking** a row scrolls the preview to it. The content accrues on
+   the right as each post is read — images and all, fetched as you scroll to
+   them — so you can see what was actually captured before generating anything.
+
+   **Order**, above the list, is how the digest runs:
+
+   | Order | Runs |
+   | --- | --- |
+   | **Chronological** | Oldest first, as it starts out |
+   | **By source** | Grouped by publication — alphabetically, and chronological inside each, with the publication named above its run |
+   | **Custom** | Whatever you dragged it into |
+
+   **Drag** a row (by its grip, or from anywhere on it with a mouse) to set
+   where it lands in the digest. Dragging *is* the custom order: it takes
+   whatever is on screen as its starting point and switches to it, so nothing
+   jumps under the hand that moved it — and going off to another order and back
+   finds the arrangement still there.
 
    Three ways to take material out, all provisional. The **trash** on a row
    removes that whole article. Every element in the preview carries a **✕**
@@ -135,7 +153,24 @@ three steps in order, each with a link back:
    entry with nothing left drops from the digest, and its row says so. Nothing
    is deleted, so stepping back here from Output finds every mark where you
    left it.
-3. **Output** — format and its settings, then Generate. **Save PDF…** writes
+3. **Cover** — the picture the digest opens with. Think up a theme for the
+   issue — a word or two, *harvest*, *night work*, *machines at rest* — and
+   that's the term the [Metropolitan Museum's open
+   collection](https://metmuseum.github.io) is searched with. Only open-access
+   pieces are looked at, so anything it offers is a picture anyone is free to
+   print.
+
+   What it finds fills the preview as a grid of finished covers: every
+   candidate cropped to the page the digest prints on, in the digest's own
+   type, with the masthead over the top of it — so what you're picking is the
+   cover itself rather than a picture you have to imagine on one. Whichever you
+   settle on is credited at the foot of the contents: the piece, who made it,
+   when, what it's made of and how the museum came by it.
+
+   The checkbox here is what decides whether there's a cover and contents at
+   all — it used to live in Output. Leave the search alone and the cover is the
+   masthead on its own, as it was before there was a picker.
+4. **Output** — format and its settings, then Generate. **Save PDF…** writes
    the file; **Print…** hands it straight to the system's print dialog, which
    is where the paper size and the double-sided setting a folded booklet needs
    actually live.
@@ -360,11 +395,15 @@ Two things worth knowing about what comes out:
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |
 | Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists as lists, quotes as quotes, images as images — with nested matches emitted once. Image addresses are resolved against the page, and lazy-loaded `data-src`/`srcset` are read, so a placeholder `src` doesn't cost you the picture |
 | Body-copy detection | `src-tauri/src/anthropic.rs` | Rather than taking every readable tag on the page, it works out where the piece actually lives: each paragraph's length is credited to all its ancestors, and the **deepest** container still holding ~90% of the best score wins — which narrows `body > div > article` down to the article. Furniture (`nav`/`header`/`footer`/`aside`/`form`, `aria-hidden`, and classes made of words like `comments`, `share`, `subscription`, `sidebar`, `related`) is dropped first, so it can't win on a long comment thread. Class names are matched **word by word**, never as substrings — Substack's own article is `class="newsletter-post"`, which a substring match for "newsletter" would discard wholesale. The container it settled on is named in the log |
+| Running order | `src/order.ts` | Chronological, grouped by source, or the arrangement dragging left behind — which is a list of entry ids, so it survives entries being struck out and put back. Grouping is alphabetical by publication rather than by when each first appeared: it's the publications' own names, so the same scan run twice reads the same way round. Entries prepared *after* an arrangement was made have no place in it and go on the end in date order, rather than silently at the front |
+| Cover picker | `src/components/CoverPanel.tsx`, `src/components/CoverGallery.tsx` | The theme goes in on the left; the grid of what came back fills the preview. Every candidate is drawn as the finished cover — the page's own proportions, `object-fit: cover` for the same crop the PDF makes, the digest's own font, and the masthead over a scrim that fades off its bottom edge as the printed one does. Pictures come down through the same backend fetch the digest's own images use, a screen ahead of the scroll, so what the grid can show is what the cover can print |
+| Met collection API | `src-tauri/src/met.rs` | Two kinds of call — one search for the ids a theme matches, then one per id for the piece itself — which is why it's in Rust rather than the webview: a dozen requests, no CORS, and the candidate list capped rather than walked. `isPublicDomain` is what makes a result printable, and it's also what fills in the image fields. Details are fetched **in order** (`buffered`, not `buffer_unordered`) since the museum's ranking is the only ordering the grid has, and a record that comes back without a picture is simply dropped. Twice as many ids are held ready as the grid needs, so a dropped one leaves no hole, but the stream is closed by `take` as soon as the grid is full — the spares are only ever asked for if they're wanted. Unit-tested |
+| Cover and contents | `src/pdf/layout.ts` (`drawFrontMatter`) | The picture is scaled until it covers the page and centred, so the overflow falls outside the page box, which is where a viewer and a printer both clip it. The masthead goes over a scrim of nested slabs — nested, because two translucent rectangles meeting at an edge leave a seam, and every one would read as a line ruled across the picture. The contents open on the next page, or the one after for a booklet, where the back of the cover sheet is left blank (and given an empty content stream, since a page with none at all can't be imposed onto a sheet). The credit's height is held back on every contents page, so the list can't fill the last one out from under it |
 | PDF layout engine | `src/pdf/layout.ts` | Column flow, word wrap, widow control, multi-page linked contents, saddle-stitch imposition — built on pdf-lib. Images break the column rather than sit in it: each is drawn at its own size (pixels read as 96 to the inch, points as 72), centred, and starts the next column rather than run off the bottom of this one. Only a picture wider than the measure is scaled down to it, and one taller than 60% of the column is capped at that, so no image takes a column on its own |
 | What's drawn where | `src/pdf/layout.ts` (`beginBlock`/`endBlock`) | The layout returns the rectangle every block occupies, which is what makes a generated page clickable. A block that flows across a column break is recorded once per column, so each part of it is its own target; an image's rectangle is narrowed to the picture, so the white beside a small one isn't a hit. The numbers are the content's own, then shifted past the front matter once its page count is known, and moved onto the sheets — offset into the right-hand slot and all — when the booklet is imposed |
-| EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires) |
+| EPUB packaging | `src/epub/build.ts` | EPUB 3 container: package document, navigation document, legacy NCX, one chapter per post; zipped with fflate (`mimetype` stored first, as OCF requires). The cover picture goes in as the book's `cover-image`, with the EPUB 2 `<meta name="cover">` beside it so older readers find it too; the in-app preview swaps the archive reference for the picture itself, since nothing unpacks the archive where the preview frame can reach it |
 | EPUB markup | `src/epub/xhtml.ts` | Content blocks → XHTML, XML escaping, and the book's stylesheet |
-| Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters and by the Organize preview, which shows the same re-encoded image it will print. The preview fetches lazily (`IntersectionObserver`, a screen ahead), so a hundred-image digest doesn't stall the step for pictures nobody has scrolled to |
+| Image pipeline | `src/images.ts` | Fetch via Rust (no CORS), decode in webview, downscale, re-encode JPEG — shared by both exporters and by the Organize preview, which shows the same re-encoded image it will print. The preview fetches lazily (`IntersectionObserver`, a screen ahead), so a hundred-image digest doesn't stall the step for pictures nobody has scrolled to. A cover is kept larger than a picture that sits in a column, being printed the full size of the page, and the size is part of the cache key — the same picture can be wanted small for one and large for the other |
 | Preview | `src/components/Preview.tsx` | Renders the actual generated PDF with pdf.js, twice: full size in the column, and again at 150px as a sticky rail of thumbnails that scrolls the pages when clicked. A click on a page is turned back into PDF points from the canvas's own scale and hit-tested against the placements, smallest rectangle winning, so a picture beats the column it sits in. EPUBs render their own markup in a sandboxed frame |
 | Strike-out tool | `src/components/ContentPreview.tsx`, `src/types.ts` | A rubber-band drag over the Organize preview marks blocks (⌥ to unmark); a ✕ on each block marks that one; a row's trash marks every block of that entry at once; and so does a click on the generated PDF. They all land in the same place. Marks are keys — entry id plus block index — held beside the content rather than cut out of it, so they survive reordering and stepping back and forth; `withRemovals` applies them on the way to the exporters |
 | Remembering removals | `src/remember.ts` | The signature a filter recognises material by, for *Remember removed content*. It's the block's own identity rather than the classes around it: a newsletter template gives every paragraph in the body the same class, so a signature made of those would take out one week's sign-off and next week's article with it. Images reduce to an address with the CDN's resizing wrapper unwrapped and the query string dropped, text to its words folded to lower case; a horizontal rule signs as nothing at all, since remembering one would quietly delete every rule in the digest. Capped at 500 per filter, oldest dropped |
@@ -397,6 +436,10 @@ nothing is dropped and the files stay small too.
   device, nothing more — no subjects, no content — and Settings clears it.
 - Email content and images are fetched directly from Google/Substack CDNs and
   never leave the device.
+- The cover search sends the theme you type to the Metropolitan Museum's public
+  API, and the picture you choose is fetched from their image servers. That's
+  the whole of it — no key, no account, nothing about your mail — and nothing
+  goes at all unless you search.
 - **Print…** writes the digest to the system temp directory so the platform's
   print flow has a file to take, and leaves it there for the printer to finish
   with. It never goes anywhere else.

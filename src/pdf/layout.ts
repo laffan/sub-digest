@@ -12,17 +12,20 @@ import {
   type RGB,
 } from "pdf-lib";
 import {
+  PAGE_POINTS,
   blockKey,
   byline,
   type Block,
   type BlockPlacement,
+  type CoverArtwork,
   type DigestPost,
   type LayoutSettings,
-  type PageSizeName,
   type PreparedImage,
 } from "../types";
-import { prepareImage } from "../images";
-import { dateRangeLabel, formatLongDate } from "../dates";
+import { COVER_MAX_PX, prepareImage } from "../images";
+import { CREDIT_HEADING, coverCredit } from "../met";
+import { logWarn } from "../log";
+import { dateRangeLabel, formatLongDate, issueLine } from "../dates";
 
 const MM = 72 / 25.4; // millimetres → points
 /**
@@ -30,13 +33,6 @@ const MM = 72 / 25.4; // millimetres → points
  * point is a 72nd. So this is what "actual size" means on the page.
  */
 const PX = 72 / 96;
-
-const PAGE_SIZES: Record<PageSizeName, [number, number]> = {
-  A5: [419.53, 595.28],
-  HalfLetter: [396, 612],
-  A4: [595.28, 841.89],
-  Letter: [612, 792],
-};
 
 interface FontSet {
   regular: PDFFont;
@@ -70,18 +66,18 @@ export interface GeneratedPdf {
 }
 
 /**
- * Lays selected posts out chronologically into a PDF. Returns the finished
- * document bytes (after optional saddle-stitch imposition) along with the
- * rectangle every block occupies, so the preview can turn a click on the page
- * into the block underneath it.
+ * Lays selected posts out into a PDF, in the running order the caller hands
+ * them over in. Returns the finished document bytes (after optional
+ * saddle-stitch imposition) along with the rectangle every block occupies, so
+ * the preview can turn a click on the page into the block underneath it.
  */
 export async function generatePdf(
   posts: DigestPost[],
   settings: LayoutSettings,
-  onProgress: GenerateProgress
+  onProgress: GenerateProgress,
+  cover: CoverArtwork | null = null
 ): Promise<GeneratedPdf> {
-  // The caller's order is the running order — the Organize step sets it, and
-  // it starts out chronological.
+  // The caller's order is the running order — the Organize step sets it.
   const sorted = posts;
 
   const doc = await PDFDocument.create();
@@ -105,7 +101,9 @@ export async function generatePdf(
   flow.drawFooters(sorted);
 
   const front =
-    settings.coverPage && sorted.length > 0 ? drawFrontMatter(doc, flow, toc, sorted) : 0;
+    settings.coverPage && sorted.length > 0
+      ? await drawFrontMatter(doc, flow, toc, sorted, settings, cover, onProgress)
+      : 0;
   // Placements are recorded against the content's own page numbering; the front
   // matter goes in ahead of it, so everything shifts down by that many pages.
   const placements = flow.placements.map((p) => ({ ...p, page: p.page - 1 + front }));
@@ -162,7 +160,7 @@ class Flow {
     private settings: LayoutSettings,
     readonly fonts: FontSet
   ) {
-    [this.pageW, this.pageH] = PAGE_SIZES[settings.pageSize];
+    [this.pageW, this.pageH] = PAGE_POINTS[settings.pageSize];
     this.mTop = settings.marginTop * MM;
     this.mBottom = settings.marginBottom * MM;
     this.mLeft = settings.marginLeft * MM;
@@ -699,17 +697,25 @@ interface PendingLink {
 }
 
 /**
- * Draws the front matter ahead of the content: a masthead, then a table of
+ * Draws the front matter ahead of the content: the cover, then a table of
  * contents listing *every* post — continuing onto as many pages as it needs —
  * with each entry a clickable link to the page the post starts on. Returns how
  * many pages it took, which is what the content is now offset by.
+ *
+ * The cover is the chosen picture, cropped to the page with the masthead over
+ * it, and the contents open inside: on the next page normally, and a page later
+ * for a booklet, where the back of the cover sheet is the inside cover and is
+ * left blank.
  */
-function drawFrontMatter(
+async function drawFrontMatter(
   doc: PDFDocument,
   flow: Flow,
   toc: TocEntry[],
-  posts: DigestPost[]
-): number {
+  posts: DigestPost[],
+  settings: LayoutSettings,
+  cover: CoverArtwork | null,
+  onProgress: GenerateProgress
+): Promise<number> {
   const { pageW, pageH, fonts } = flow;
   const margin = Math.max(pageW * 0.09, 34);
   const width = pageW - margin * 2;
@@ -719,67 +725,96 @@ function drawFrontMatter(
   const pageNumW = fonts.bold.widthOfTextAtSize("000", titleSize) + 8;
   const titleW = width - pageNumW;
   const topY = pageH - Math.max(pageH * 0.1, 44);
+  const subtitle = issueLine(posts);
 
   // Front matter goes ahead of the content, so the nth page inserts at index n.
   let frontCount = 0;
   const addFrontPage = (): PDFPage => doc.insertPage(frontCount++, [pageW, pageH]);
 
-  let page = addFrontPage();
-  const center = (text: string, y: number, font: PDFFont, size: number, color = INK) => {
-    const t = sanitize(text);
-    page.drawText(t, {
-      x: (pageW - font.widthOfTextAtSize(t, size)) / 2,
-      y,
-      size,
-      font,
-      color,
-    });
-  };
+  // The cover. A picture fills it; without one the masthead stands on its own,
+  // which is what a digest generated before there was a picker still gets.
+  let picture: PreparedImage | null = null;
+  if (cover) {
+    onProgress("Fetching the cover picture…");
+    picture = await prepareImage(cover.imageUrl, COVER_MAX_PX);
+    if (!picture) {
+      logWarn("cover", `Could not fetch the cover picture (${cover.imageUrl}); printed without it`);
+    }
+  }
+  const coverPage = addFrontPage();
+  if (picture) {
+    drawCoverPicture(coverPage, await flow.embedJpg(picture.jpeg), picture, pageW, pageH);
+  }
+  drawMasthead(coverPage, fonts, pageW, pageH, subtitle, picture !== null);
 
-  // Masthead
-  center("S U B S T A C K", topY + 26, fonts.regular, 9, MUTED);
-  center("Digest", topY, fonts.bold, 34);
-  page.drawLine({
-    start: { x: margin, y: topY - 14 },
-    end: { x: pageW - margin, y: topY - 14 },
-    thickness: 1,
-    color: INK,
-  });
-  const pubs = [...new Set(posts.map((p) => p.publication))];
-  const subtitle = `${dateRangeLabel(posts)}   ·   ${posts.length} post${posts.length === 1 ? "" : "s"} from ${pubs.length} publication${pubs.length === 1 ? "" : "s"}`;
-  center(subtitle, topY - 30, fonts.italic, 9, MUTED);
+  // A booklet's inside cover is the back of that same sheet. Leaving it blank
+  // is what puts the contents two pages in rather than one.
+  if (settings.bookletImposition) {
+    // Empty, but not contentless: a page with no content stream at all can't be
+    // embedded onto a sheet, and this one is bound for the back of the cover.
+    addFrontPage().pushOperators();
+  }
 
-  /** Starts a continuation page and returns the y to resume the list at. */
-  const continuePage = (): number => {
+  // What the cover is, which closes the contents. Its height is reserved on
+  // every contents page, so the list can't fill the last one out from under it.
+  const credit = cover && picture ? creditBlock(cover, fonts, width, metaSize) : null;
+  const floor = bottom + (credit ? credit.height : 0);
+
+  let page!: PDFPage;
+  /** Opens a contents page and returns the y to start the list at. */
+  const contentsPage = (continued: boolean): number => {
     page = addFrontPage();
-    page.drawText(sanitize("Contents, continued"), {
+    if (continued) {
+      page.drawText(sanitize("Contents, continued"), {
+        x: margin,
+        y: topY,
+        size: metaSize,
+        font: fonts.italic,
+        color: MUTED,
+      });
+      page.drawLine({
+        start: { x: margin, y: topY - 10 },
+        end: { x: pageW - margin, y: topY - 10 },
+        thickness: 0.6,
+        color: RULE,
+      });
+      return topY - 10 - titleSize * 1.4;
+    }
+    page.drawText(sanitize("Contents"), {
       x: margin,
       y: topY,
+      size: titleSize * 1.9,
+      font: fonts.bold,
+      color: INK,
+    });
+    page.drawText(sanitize(subtitle), {
+      x: margin,
+      y: topY - metaSize * 1.8,
       size: metaSize,
       font: fonts.italic,
       color: MUTED,
     });
     page.drawLine({
-      start: { x: margin, y: topY - 10 },
-      end: { x: pageW - margin, y: topY - 10 },
+      start: { x: margin, y: topY - metaSize * 2.9 },
+      end: { x: pageW - margin, y: topY - metaSize * 2.9 },
       thickness: 0.6,
       color: RULE,
     });
-    return topY - 10 - titleSize * 1.4;
+    return topY - metaSize * 2.9 - titleSize * 1.4;
   };
 
   // Contents
   const links: PendingLink[] = [];
-  let y = topY - 64;
-  let pageIsEmpty = false; // an entry taller than a page has to overflow somewhere
+  let y = contentsPage(false);
+  let pageIsEmpty = true; // an entry taller than a page has to overflow somewhere
 
   for (const entry of toc) {
     // Titles wrap as far as they need to; the list flows onto another page
     // rather than cutting the digest's contents short.
     const lines = wrapText(sanitize(entry.title) || "(untitled)", fonts.bold, titleSize, titleW);
     const entryH = lines.length * titleSize * 1.25 + metaSize * 1.5 + titleSize * 0.9;
-    if (y - entryH < bottom && !pageIsEmpty) {
-      y = continuePage();
+    if (y - entryH < floor && !pageIsEmpty) {
+      y = contentsPage(true);
       pageIsEmpty = true;
     }
     const entryTop = y;
@@ -830,12 +865,159 @@ function drawFrontMatter(
     pageIsEmpty = false;
   }
 
+  // The credit sits at the foot of the last contents page, on the space held
+  // back for it — not under the final entry, wherever that happened to land.
+  if (credit) drawCredit(page, credit, margin, width, bottom + credit.height);
+
   // Content pages sit after the front matter, so a post that prints page n is
   // the document's (frontCount + n - 1)th page.
   for (const link of links) {
     addInternalLink(doc, link.page, link.rect, doc.getPage(frontCount + link.target - 1));
   }
   return frontCount;
+}
+
+/**
+ * Fills the cover with the picture, cropped to the page: scaled until it covers
+ * both dimensions and centred, so what runs over the edge falls outside the
+ * page box — which is exactly where a viewer and a printer clip it. Cropping,
+ * rather than fitting, is why the picker shows the same crop before it's
+ * chosen.
+ */
+function drawCoverPicture(
+  page: PDFPage,
+  pdfImage: PDFImage,
+  img: PreparedImage,
+  pageW: number,
+  pageH: number
+) {
+  const scale = Math.max(pageW / img.width, pageH / img.height);
+  const w = img.width * scale;
+  const h = img.height * scale;
+  page.drawImage(pdfImage, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
+}
+
+/**
+ * The digest's masthead — kicker, wordmark, rule and the issue line under it.
+ * Over a picture it's white on a scrim, so it reads against a dark painting and
+ * a pale one alike; on a bare cover it's ink on white, where it has always been.
+ */
+function drawMasthead(
+  page: PDFPage,
+  fonts: FontSet,
+  pageW: number,
+  pageH: number,
+  subtitle: string,
+  overPicture: boolean
+) {
+  const margin = Math.max(pageW * 0.09, 34);
+  const topY = pageH - Math.max(pageH * (overPicture ? 0.085 : 0.1), overPicture ? 38 : 44);
+  const ink = overPicture ? rgb(1, 1, 1) : INK;
+  const quiet = overPicture ? rgb(0.9, 0.9, 0.93) : MUTED;
+  if (overPicture) drawScrim(page, pageW, pageH, topY - 46);
+
+  const center = (text: string, y: number, font: PDFFont, size: number, color: RGB) => {
+    const t = sanitize(text);
+    page.drawText(t, { x: (pageW - font.widthOfTextAtSize(t, size)) / 2, y, size, font, color });
+  };
+  center("S U B S T A C K", topY + 26, fonts.regular, 9, quiet);
+  center("Digest", topY, fonts.bold, 34, ink);
+  page.drawLine({
+    start: { x: margin, y: topY - 14 },
+    end: { x: pageW - margin, y: topY - 14 },
+    thickness: 1,
+    color: ink,
+  });
+  center(subtitle, topY - 30, fonts.italic, 9, quiet);
+}
+
+/**
+ * Darkens the band the masthead sits in. pdf-lib has no gradients, so the fade
+ * off the bottom edge is a stack of slabs, each reaching a little further down
+ * than the last. They're nested rather than laid end to end deliberately: two
+ * translucent rectangles meeting at an edge leave a seam, and every one of them
+ * would read as a line ruled across the picture.
+ */
+function drawScrim(page: PDFPage, pageW: number, pageH: number, bottomY: number) {
+  const dark = 0.44;
+  const black = rgb(0, 0, 0);
+  page.drawRectangle({
+    x: 0,
+    y: bottomY,
+    width: pageW,
+    height: pageH - bottomY,
+    color: black,
+    opacity: dark,
+  });
+  const steps = 12;
+  const fade = 34;
+  // Each slab's own opacity, such that the `steps` of them covering the top of
+  // the fade come to `dark` between them.
+  const each = 1 - Math.pow(1 - dark, 1 / steps);
+  for (let i = 1; i <= steps; i++) {
+    const depth = (fade * i) / steps;
+    page.drawRectangle({
+      x: 0,
+      y: bottomY - depth,
+      height: depth,
+      width: pageW,
+      color: black,
+      opacity: each,
+    });
+  }
+}
+
+/** The credit under the contents, wrapped to the measure and ready to draw. */
+interface CreditBlock {
+  rows: { text: string; font: PDFFont; size: number; color: RGB }[];
+  /** The air between the rule at the top and the first line. */
+  gap: number;
+  /** Everything from the rule to the last baseline. */
+  height: number;
+}
+
+/** Sets the cover picture's credit: what it is, who made it, when, and what of. */
+function creditBlock(
+  cover: CoverArtwork,
+  fonts: FontSet,
+  width: number,
+  size: number
+): CreditBlock {
+  const rows: CreditBlock["rows"] = [];
+  const push = (text: string, font: PDFFont, s: number, color: RGB) => {
+    for (const line of wrapText(sanitize(text), font, s, width)) {
+      rows.push({ text: line, font, size: s, color });
+    }
+  };
+  push(CREDIT_HEADING, fonts.bold, size * 0.78, MUTED);
+  for (const line of coverCredit(cover)) {
+    if (line.weight === "title") push(line.text, fonts.bold, size, INK);
+    else if (line.weight === "body") push(line.text, fonts.regular, size * 0.92, INK);
+    else push(line.text, fonts.italic, size * 0.85, MUTED);
+  }
+  const gap = size * 1.1;
+  return { rows, gap, height: gap + rows.reduce((h, r) => h + r.size * 1.42, 0) };
+}
+
+/** Draws the credit with the rule at its top edge sitting on `top`. */
+function drawCredit(
+  page: PDFPage,
+  block: CreditBlock,
+  x: number,
+  width: number,
+  top: number
+) {
+  page.drawLine({
+    start: { x, y: top },
+    end: { x: x + width, y: top },
+    thickness: 0.6,
+    color: RULE,
+  });
+  let y = top - block.gap;
+  for (const row of block.rows) {
+    y -= row.size * 1.42;
+    page.drawText(row.text, { x, y, size: row.size, font: row.font, color: row.color });
+  }
 }
 
 /** Turns `rect` on `page` into a click target that jumps to `target`'s top. */

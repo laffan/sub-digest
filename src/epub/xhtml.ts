@@ -275,6 +275,55 @@ hr.rule {
   text-align: center;
 }
 
+/* The cover picture, under the masthead. A reading device owns the page shape,
+   so it's shown whole rather than cropped the way the printed cover crops it. */
+.cover-art {
+  margin: 1.4em 0 0;
+  text-align: center;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+.cover-art img {
+  max-width: 100%;
+  max-height: 74vh;
+  height: auto;
+}
+
+/* What the cover is, at the foot of the contents */
+.credit {
+  margin: 2.4em 0 0;
+  border-top: 1px solid #bfbfc4;
+  padding-top: 0.7em;
+}
+
+.credit p {
+  text-indent: 0;
+  text-align: left;
+  margin: 0 0 0.2em;
+}
+
+.credit-head {
+  font-size: 0.7em;
+  font-weight: bold;
+  letter-spacing: 0.14em;
+  color: #6b6b73;
+}
+
+.credit-title {
+  font-weight: bold;
+}
+
+.credit-line {
+  font-size: 0.88em;
+}
+
+.credit-note {
+  font-style: italic;
+  font-size: 0.8em;
+  color: #6b6b73;
+}
+
 /* Table of contents */
 nav h1 { font-size: 1.4em; margin: 0 0 0.8em; }
 nav ol { list-style: none; margin: 0; padding: 0; }

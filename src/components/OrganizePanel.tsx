@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { byline, type DigestPost } from "../types";
+import { ORDERS, groupHeadings, type PostOrder } from "../order";
 import { formatShortDate } from "../dates";
 
 interface Props {
@@ -13,6 +14,9 @@ interface Props {
   removedCount: number;
   /** Blocks of this entry that survive into the output. */
   keptBlocks: (post: DigestPost) => number;
+  /** How the entries are arranged, and the picker that changes it. */
+  order: PostOrder;
+  onOrderChange: (order: PostOrder) => void;
   onReorder: (from: number, to: number) => void;
   onFocus: (id: string) => void;
   onToggleRemoving: () => void;
@@ -35,6 +39,10 @@ const DRAG_THRESHOLD = 4;
  * is the order the PDF and EPUB use, so dragging a row here moves it in the
  * output — and the rows are the articles themselves, not the emails that
  * carried them, so a link roundup arrives as its pieces.
+ *
+ * The order is chronological, grouped by source, or whatever the user dragged
+ * it into; dragging a row is itself the way into that last one, so choosing it
+ * from the picker is only needed to go back to an arrangement already made.
  */
 export function OrganizePanel({
   posts,
@@ -44,6 +52,8 @@ export function OrganizePanel({
   removing,
   removedCount,
   keptBlocks,
+  order,
+  onOrderChange,
   onReorder,
   onFocus,
   onToggleRemoving,
@@ -51,6 +61,7 @@ export function OrganizePanel({
   onToggleEntry,
 }: Props) {
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const groups = order === "source" ? groupHeadings(posts) : null;
   const listRef = useRef<HTMLOListElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   // The press that might become a drag. Held in a ref so moving the pointer
@@ -123,6 +134,25 @@ export function OrganizePanel({
       </div>
 
       {posts.length > 0 && (
+        <div className="order-row">
+          <span className="order-label">Order</span>
+          <div className="order-toggle" role="group" aria-label="Running order">
+            {ORDERS.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                title={o.hint}
+                aria-pressed={order === o.value}
+                onClick={() => onOrderChange(o.value)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {posts.length > 0 && (
         <div className="organize-tools">
           <button
             className={`tool-btn${removing ? " active" : ""}`}
@@ -143,6 +173,9 @@ export function OrganizePanel({
       <ol className={`toc${drag ? " dragging" : ""}`} ref={listRef}>
         {posts.map((post, i) => {
           const kept = keptBlocks(post);
+          // Grouped by source, each run of a publication's posts is announced
+          // once — the sections the digest will actually read as.
+          const heading = groups?.get(post.id);
           const gone = kept === 0;
           const classes = [
             "toc-row",
@@ -154,68 +187,71 @@ export function OrganizePanel({
             .filter(Boolean)
             .join(" ");
           return (
-            <li
-              className={classes}
-              key={post.id}
-              onPointerDown={(e) => press(e, i, false)}
-              onPointerMove={move}
-              onPointerUp={release}
-              onPointerCancel={cancel}
-              title="Show this in the preview"
-            >
-              <span className="toc-num">{i + 1}</span>
-              <div className="toc-text">
-                <div className="toc-title">{post.title}</div>
-                <div className="toc-meta">
-                  {byline(post)} · {formatShortDate(post.dateMs)} ·{" "}
-                  {kept === post.blocks.length
-                    ? `${kept} blocks`
-                    : `${kept}/${post.blocks.length} blocks`}
+            <Fragment key={post.id}>
+              {heading && <li className="toc-group">{heading}</li>}
+              <li
+                className={classes}
+                onPointerDown={(e) => press(e, i, false)}
+                onPointerMove={move}
+                onPointerUp={release}
+                onPointerCancel={cancel}
+                title="Show this in the preview"
+              >
+                <span className="toc-num">{i + 1}</span>
+                <div className="toc-text">
+                  <div className="toc-title">{post.title}</div>
+                  <div className="toc-meta">
+                    {byline(post)} · {formatShortDate(post.dateMs)} ·{" "}
+                    {kept === post.blocks.length
+                      ? `${kept} blocks`
+                      : `${kept}/${post.blocks.length} blocks`}
+                  </div>
+                  {post.sourceUrl && <div className="toc-url">{post.sourceUrl}</div>}
                 </div>
-                {post.sourceUrl && <div className="toc-url">{post.sourceUrl}</div>}
-              </div>
-              <div className="toc-actions">
-                <button
-                  className="grip"
-                  aria-label={`Reorder "${post.title}"`}
-                  title="Drag to reorder"
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    press(e, i, true);
-                  }}
-                  onPointerMove={move}
-                  onPointerUp={release}
-                  onPointerCancel={cancel}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripIcon />
-                </button>
-                <button
-                  className={`trash-btn${gone ? " active" : ""}`}
-                  aria-pressed={gone}
-                  aria-label={
-                    gone ? `Put "${post.title}" back` : `Remove "${post.title}" from the output`
-                  }
-                  title={gone ? "Put this article back" : "Remove this article from the output"}
-                  // Never let the row read this as a press of its own.
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleEntry(post);
-                  }}
-                >
-                  <TrashIcon />
-                </button>
-              </div>
-            </li>
+                <div className="toc-actions">
+                  <button
+                    className="grip"
+                    aria-label={`Reorder "${post.title}"`}
+                    title="Drag to reorder"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      press(e, i, true);
+                    }}
+                    onPointerMove={move}
+                    onPointerUp={release}
+                    onPointerCancel={cancel}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <GripIcon />
+                  </button>
+                  <button
+                    className={`trash-btn${gone ? " active" : ""}`}
+                    aria-pressed={gone}
+                    aria-label={
+                      gone ? `Put "${post.title}" back` : `Remove "${post.title}" from the output`
+                    }
+                    title={gone ? "Put this article back" : "Remove this article from the output"}
+                    // Never let the row read this as a press of its own.
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleEntry(post);
+                    }}
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              </li>
+            </Fragment>
           );
         })}
       </ol>
 
       {posts.length > 0 && (
         <p className="hint">
-          Drag an entry to set where it lands in the digest; click one to find it in the preview.
-          Each element there carries a ✕ to take out just that one.
+          Drag an entry to set where it lands in the digest — which is what Custom order is;
+          click one to find it in the preview. Each element there carries a ✕ to take out just
+          that one.
         </p>
       )}
     </section>

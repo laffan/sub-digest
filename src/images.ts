@@ -2,6 +2,12 @@ import { fetchImageB64 } from "./gmail";
 import type { PreparedImage } from "./types";
 
 const MAX_PX = 1400;
+/**
+ * A cover is the one picture printed the full size of the page, so it's kept
+ * larger than the pictures that sit inside a column — 1400px across an A4 sheet
+ * is soft in print.
+ */
+export const COVER_MAX_PX = 2200;
 
 const cache = new Map<string, PreparedImage | null>();
 const objectUrls = new Map<string, string | null>();
@@ -27,11 +33,17 @@ export async function imageObjectUrl(src: string): Promise<string | null> {
 
 /**
  * Fetches an image through the Rust backend (avoids CORS), decodes it in the
- * webview, downscales it, and re-encodes as JPEG so pdf-lib can embed any
- * source format (webp, gif, png, ...) uniformly.
+ * webview, downscales it to `maxPx` on its longest side, and re-encodes as JPEG
+ * so pdf-lib can embed any source format (webp, gif, png, ...) uniformly.
  */
-export async function prepareImage(src: string): Promise<PreparedImage | null> {
-  if (cache.has(src)) return cache.get(src)!;
+export async function prepareImage(
+  src: string,
+  maxPx = MAX_PX
+): Promise<PreparedImage | null> {
+  // The size is part of what's cached: the same picture can be wanted small for
+  // a column and large for a cover.
+  const key = maxPx === MAX_PX ? src : `${maxPx}|${src}`;
+  if (cache.has(key)) return cache.get(key)!;
   let result: PreparedImage | null = null;
   try {
     const b64 = await fetchImageB64(src);
@@ -39,7 +51,7 @@ export async function prepareImage(src: string): Promise<PreparedImage | null> {
     const blob = new Blob([bytes]);
     const bitmap = await createImageBitmap(blob);
     if (bitmap.width > 3 && bitmap.height > 3) {
-      const scale = Math.min(1, MAX_PX / Math.max(bitmap.width, bitmap.height));
+      const scale = Math.min(1, maxPx / Math.max(bitmap.width, bitmap.height));
       const w = Math.max(1, Math.round(bitmap.width * scale));
       const h = Math.max(1, Math.round(bitmap.height * scale));
       const canvas = document.createElement("canvas");
@@ -61,6 +73,6 @@ export async function prepareImage(src: string): Promise<PreparedImage | null> {
   } catch {
     result = null; // unreachable/undecodable image: just skip it
   }
-  cache.set(src, result);
+  cache.set(key, result);
   return result;
 }

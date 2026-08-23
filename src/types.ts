@@ -84,6 +84,18 @@ export type FilterField = "domains" | "senders" | "subjects" | "terms";
 export type FontFamily = "Helvetica" | "Times" | "Courier";
 export type PageSizeName = "A5" | "HalfLetter" | "A4" | "Letter";
 
+/**
+ * Each page size in PDF points. The layout engine draws with these; the cover
+ * picker only wants the shape of them, so it can crop a picture to the page it
+ * will actually be printed on.
+ */
+export const PAGE_POINTS: Record<PageSizeName, [number, number]> = {
+  A5: [419.53, 595.28],
+  HalfLetter: [396, 612],
+  A4: [595.28, 841.89],
+  Letter: [612, 792],
+};
+
 /** Which file Generate produces. */
 export type ExportFormat = "pdf" | "epub";
 
@@ -132,6 +144,35 @@ export const DEFAULT_SETTINGS: LayoutSettings = {
   coverPage: true,
   bookletImposition: false,
 };
+
+/**
+ * One artwork from the Metropolitan Museum's open collection API — a candidate
+ * for the cover, and once chosen, the thing the credit under the contents
+ * describes. Only open-access pieces are searched, so every one of these
+ * carries an image the digest is free to print.
+ */
+export interface CoverArtwork {
+  /** The museum's own id for the piece; unique, and the picker's React key. */
+  objectId: number;
+  title: string;
+  /** `artistDisplayName` — empty on an unattributed piece. */
+  artist: string;
+  /** `artistDisplayBio`, e.g. "Dutch, Zundert 1853–1890 Auvers-sur-Oise". */
+  artistBio: string;
+  /** `objectDate`, in the museum's own phrasing: "1887", "ca. 1487". */
+  date: string;
+  /** What it's made of — "Oil on canvas", "Woodblock print". */
+  medium: string;
+  /** How the museum came by it, e.g. "Rogers Fund, 1949". */
+  creditLine: string;
+  department: string;
+  /** The museum's page for the piece. */
+  objectUrl: string;
+  /** Full-size image, for the printed cover. */
+  imageUrl: string;
+  /** Web-sized image, for the picker's grid. */
+  thumbUrl: string;
+}
 
 /** Content blocks extracted from a Substack email body. */
 export type Block =

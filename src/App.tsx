@@ -8,6 +8,8 @@ import { SettingsModal } from "./components/SettingsModal";
 import { FilterEditorModal } from "./components/FilterEditorModal";
 import { Preview } from "./components/Preview";
 import { OrganizePanel } from "./components/OrganizePanel";
+import { CoverPanel } from "./components/CoverPanel";
+import { CoverGallery } from "./components/CoverGallery";
 import { ContentPreview } from "./components/ContentPreview";
 import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
@@ -22,6 +24,8 @@ import {
   loadFilters,
 } from "./filters";
 import { blockSignature, rememberedKeys, withSignatures } from "./remember";
+import { orderPosts, type PostOrder } from "./order";
+import { COVER_RESULTS, artworkLabel, metSearch } from "./met";
 import { markdownToBlocks } from "./parse";
 import {
   gmailCancelConnect,
@@ -37,7 +41,7 @@ import {
 import { parseEmailHtml, parsePlainText } from "./parse";
 import { generatePdf } from "./pdf/layout";
 import { generateEpub } from "./epub/build";
-import { dayEndMs, dayStartMs, isoLocalDay } from "./dates";
+import { dayEndMs, dayStartMs, isoLocalDay, issueLine } from "./dates";
 import {
   CUSTOM_RANGE,
   DEFAULT_SETTINGS,
@@ -45,6 +49,7 @@ import {
   outputFileName,
   parseBlockKey,
   withRemovals,
+  type CoverArtwork,
   type DateRange,
   type DigestPost,
   type GeneratedOutput,
@@ -99,13 +104,18 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<GeneratedOutput | null>(null);
   // The column moves through the work in order — pick posts, watch them get
-  // read and set their running order, then choose an output format. Each step
-  // is settled before the next depends on it.
-  const [step, setStep] = useState<"select" | "organize" | "output">("select");
+  // read and set their running order, choose what the cover is, then choose an
+  // output format. Each step is settled before the next depends on it.
+  const [step, setStep] = useState<"select" | "organize" | "cover" | "output">("select");
   const [showLog, setShowLog] = useState(false);
-  // Entries fetched and parsed, in the order they'll appear in the digest. An
-  // agent-processed email contributes one entry per article it linked to.
+  // Entries fetched and parsed, in the order they were read. An agent-processed
+  // email contributes one entry per article it linked to. What order they go
+  // out in is `order` below, applied on the way to `ordered`.
   const [prepared, setPrepared] = useState<DigestPost[]>([]);
+  // How the digest runs: by date, grouped by publication, or the arrangement
+  // dragging left behind — which is what `customOrder`, a list of entry ids, is.
+  const [order, setOrder] = useState<PostOrder>("chronological");
+  const [customOrder, setCustomOrder] = useState<string[]>([]);
   const [preparing, setPreparing] = useState(false);
   const [prepareDone, setPrepareDone] = useState(0);
   const [prepareTotal, setPrepareTotal] = useState(0);
@@ -120,6 +130,16 @@ export default function App() {
   // Bumped when something is clicked out of the generated document, which asks
   // for it to be laid out again.
   const [refreshTick, setRefreshTick] = useState(0);
+
+  // The cover: a theme to search the Met's open collection with, what came
+  // back, and the piece the user settled on. All of it belongs to this issue,
+  // so none of it is remembered between runs.
+  const [theme, setTheme] = useState("");
+  /** The theme the pieces on screen came back from. */
+  const [searched, setSearched] = useState("");
+  const [coverResults, setCoverResults] = useState<CoverArtwork[]>([]);
+  const [coverSearching, setCoverSearching] = useState(false);
+  const [cover, setCover] = useState<CoverArtwork | null>(null);
 
   // Posts processed before this session began. It's a snapshot on purpose: a
   // post read a minute ago shouldn't grey out under the user mid-run, so
@@ -324,6 +344,9 @@ export default function App() {
     setError(null);
     setOutput(null);
     setPrepared([]);
+    // Last run's arrangement named entries this one may not even have.
+    setCustomOrder([]);
+    setOrder((o) => (o === "custom" ? "chronological" : o));
     setPrepareDone(0);
     setPrepareTotal(selected.length);
     setPreparing(true);
@@ -427,19 +450,47 @@ export default function App() {
     }
   }, [posts, filters, anthropicKey, report, fail]);
 
-  /** Reorders the digest; any document already generated no longer matches. */
-  const reorderPost = useCallback((from: number, to: number) => {
-    setPrepared((prev) => {
-      if (from === to || from < 0 || from >= prev.length || to < 0 || to >= prev.length) {
-        return prev;
+  // The running order itself: the prepared entries under whichever arrangement
+  // is in force. Everything downstream — the preview, the exporters, what a
+  // click on a row means — reads this rather than the order they arrived in.
+  const ordered = useMemo(
+    () => orderPosts(prepared, order, customOrder),
+    [prepared, order, customOrder]
+  );
+
+  /**
+   * Moves a row. Dragging *is* the custom order, so a drag switches to it,
+   * taking the arrangement on screen as its starting point — nothing jumps
+   * under the hand that moved it.
+   */
+  const reorderPost = useCallback(
+    (from: number, to: number) => {
+      if (from === to || from < 0 || from >= ordered.length || to < 0 || to >= ordered.length) {
+        return;
       }
-      const next = [...prev];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-    setOutput(null);
-  }, []);
+      const ids = ordered.map((p) => p.id);
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      setCustomOrder(ids);
+      setOrder("custom");
+      setOutput(null);
+    },
+    [ordered]
+  );
+
+  /**
+   * Switches how the digest runs. Picking Custom before anything has been
+   * dragged adopts what's on screen, so it's a starting point rather than an
+   * empty one; an arrangement already made is kept and returned to.
+   */
+  const chooseOrder = useCallback(
+    (next: PostOrder) => {
+      if (next === "custom" && customOrder.length === 0) setCustomOrder(ordered.map((p) => p.id));
+      setOrder(next);
+      setOutput(null);
+    },
+    [ordered, customOrder]
+  );
 
   const postsById = useMemo(() => new Map(prepared.map((p) => [p.id, p])), [prepared]);
 
@@ -525,9 +576,42 @@ export default function App() {
     [removed]
   );
 
+  /**
+   * Searches the Met's open collection for the issue's theme. Only pieces the
+   * museum has released are looked at, so anything the grid offers is a picture
+   * the digest may print.
+   */
+  const searchCover = useCallback(async () => {
+    const query = theme.trim();
+    if (!query) return;
+    setError(null);
+    setCoverSearching(true);
+    logInfo("cover", `Searching the Met's open collection for "${query}"`);
+    try {
+      const found = await metSearch(query, COVER_RESULTS);
+      setCoverResults(found);
+      setSearched(query);
+    } catch (e) {
+      fail("cover", e);
+    } finally {
+      setCoverSearching(false);
+    }
+  }, [theme, fail]);
+
+  /** Settles on a picture for the cover, or takes it back off again. */
+  const chooseCover = useCallback((art: CoverArtwork | null) => {
+    setCover(art);
+    setOutput(null); // whatever was generated has the old cover on it
+    logInfo("cover", art ? `Cover: ${artworkLabel(art)}` : "Cover picture cleared");
+  }, []);
+
   // What Generate will actually lay out: the running order, less anything
   // struck out, less any entry that leaves nothing behind.
-  const forOutput = useMemo(() => withRemovals(prepared, removed), [prepared, removed]);
+  const forOutput = useMemo(() => withRemovals(ordered, removed), [ordered, removed]);
+
+  // The line under the masthead. The picker prints it on every candidate, so
+  // what's on screen is the cover as it will come out.
+  const coverIssueLine = useMemo(() => issueLine(forOutput), [forOutput]);
 
   const generate = useCallback(async () => {
     // Only reachable by clicking the last of the content out of the document
@@ -550,9 +634,9 @@ export default function App() {
     );
     try {
       if (settings.format === "epub") {
-        setOutput(await generateEpub(forOutput, settings, report));
+        setOutput(await generateEpub(forOutput, settings, report, cover));
       } else {
-        const { bytes, placements } = await generatePdf(forOutput, settings, report);
+        const { bytes, placements } = await generatePdf(forOutput, settings, report, cover);
         setOutput({ format: "pdf", bytes, placements });
       }
       setProgress("");
@@ -562,7 +646,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [forOutput, prepared.length, removed.size, settings, report, fail]);
+  }, [forOutput, prepared.length, removed.size, settings, cover, report, fail]);
 
   // Regenerating after a click on the document itself. The generate callback is
   // rebuilt whenever the content changes, so it's read from a ref: the tick and
@@ -703,13 +787,15 @@ export default function App() {
                 ← {selectedCount} post{selectedCount === 1 ? "" : "s"} selected
               </button>
               <OrganizePanel
-                posts={prepared}
+                posts={ordered}
                 done={prepareDone}
                 total={prepareTotal}
                 preparing={preparing}
                 removing={removing}
                 removedCount={removed.size}
                 keptBlocks={keptBlocks}
+                order={order}
+                onOrderChange={chooseOrder}
                 onReorder={reorderPost}
                 onFocus={(id) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }))}
                 onToggleRemoving={() => setRemoving((v) => !v)}
@@ -721,11 +807,42 @@ export default function App() {
               <button
                 className="primary"
                 disabled={preparing || forOutput.length === 0}
-                onClick={() => setStep("output")}
+                onClick={() => setStep("cover")}
               >
-                {preparing ? "Preparing…" : "Continue to output"}
+                {preparing ? "Preparing…" : "Continue to cover"}
               </button>
               {progress && <div className="progress">{progress}</div>}
+              {error && <div className="error">{error}</div>}
+            </div>
+          </>
+        ) : step === "cover" ? (
+          <>
+            <div className="step-body">
+              <button
+                className="back-link"
+                onClick={() => setStep("organize")}
+                title="Back to the running order"
+              >
+                ← {forOutput.length} entr{forOutput.length === 1 ? "y" : "ies"} in order
+              </button>
+              <CoverPanel
+                enabled={settings.coverPage}
+                onEnabledChange={(on) => setSettings((s) => ({ ...s, coverPage: on }))}
+                theme={theme}
+                onThemeChange={setTheme}
+                searching={coverSearching}
+                searched={searched}
+                resultCount={coverResults.length}
+                cover={cover}
+                onSearch={searchCover}
+                onClear={() => chooseCover(null)}
+                format={settings.format}
+              />
+            </div>
+            <div className="step-actions">
+              <button className="primary" onClick={() => setStep("output")}>
+                {settings.coverPage && !cover ? "Continue without a picture" : "Continue to output"}
+              </button>
               {error && <div className="error">{error}</div>}
             </div>
           </>
@@ -734,11 +851,11 @@ export default function App() {
             <div className="step-body">
               <button
                 className="back-link"
-                onClick={() => setStep("organize")}
+                onClick={() => setStep("cover")}
                 disabled={generating}
-                title={generating ? "Finish generating first" : "Back to the running order"}
+                title={generating ? "Finish generating first" : "Back to the cover"}
               >
-                ← {forOutput.length} entr{forOutput.length === 1 ? "y" : "ies"} in order
+                ← {cover ? cover.title || "Cover chosen" : "No cover picture"}
               </button>
               <h2 className="col-title">Output</h2>
               <SettingsPanel settings={settings} onChange={setSettings} />
@@ -773,12 +890,24 @@ export default function App() {
       <main className="col col-preview">
         {step === "organize" ? (
           <ContentPreview
-            posts={prepared}
+            posts={ordered}
             preparing={preparing}
             removing={removing}
             removed={removed}
             focus={focus}
             onMark={markRemoved}
+          />
+        ) : step === "cover" ? (
+          <CoverGallery
+            enabled={settings.coverPage}
+            results={coverResults}
+            searching={coverSearching}
+            searched={searched}
+            chosen={cover}
+            onChoose={chooseCover}
+            pageSize={settings.pageSize}
+            font={settings.font}
+            issueLine={coverIssueLine}
           />
         ) : (
           <Preview output={output} busy={generating} onRemoveBlock={removeFromOutput} />

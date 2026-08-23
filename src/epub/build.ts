@@ -1,13 +1,21 @@
 import { strToU8, zipSync, type Zippable } from "fflate";
-import { dateRangeLabel, formatLongDate, formatShortDate, isoDay } from "../dates";
-import { prepareImage } from "../images";
-import { byline, type DigestPost, type GeneratedOutput, type LayoutSettings } from "../types";
+import { dateRangeLabel, formatLongDate, formatShortDate, isoDay, issueLine } from "../dates";
+import { COVER_MAX_PX, prepareImage } from "../images";
+import { CREDIT_HEADING, coverCredit } from "../met";
+import { logWarn } from "../log";
+import {
+  byline,
+  type CoverArtwork,
+  type DigestPost,
+  type GeneratedOutput,
+  type LayoutSettings,
+} from "../types";
 import { blocksToXhtml, epubCss, esc, xhtmlDocument, type ImageResolver } from "./xhtml";
 
 /**
- * EPUB 3 export. Posts become chapters in the same chronological order the PDF
- * uses, so the two formats hold the same digest; unlike the PDF the text stays
- * UTF-8 (emoji and CJK survive) and reflows to the reader's own type settings.
+ * EPUB 3 export. Posts become chapters in the same running order the PDF uses,
+ * so the two formats hold the same digest; unlike the PDF the text stays UTF-8
+ * (emoji and CJK survive) and reflows to the reader's own type settings.
  */
 
 export interface GenerateProgress {
@@ -23,17 +31,19 @@ interface EpubImage {
 }
 
 const OPS = "OEBPS";
+/** Where the cover picture lives in the archive, if one was chosen. */
+const COVER_HREF = "images/cover.jpg";
 
 export async function generateEpub(
   posts: DigestPost[],
   settings: LayoutSettings,
-  onProgress: GenerateProgress
+  onProgress: GenerateProgress,
+  cover: CoverArtwork | null = null
 ): Promise<Extract<GeneratedOutput, { format: "epub" }>> {
   // Chapter order is the caller's order, set in the Organize step.
   const sorted = posts;
   const range = dateRangeLabel(sorted);
   const title = range ? `Substack Digest, ${range}` : "Substack Digest";
-  const publications = [...new Set(sorted.map((p) => p.publication))];
   // The book's authors are the people who wrote the pieces, where the
   // newsletter named them — not the newsletters that forwarded them on.
   const creators = [...new Set(sorted.map(byline))];
@@ -41,6 +51,17 @@ export async function generateEpub(
   const images: Map<string, EpubImage> = settings.includeImages
     ? await collectImages(sorted, onProgress)
     : new Map();
+
+  // The cover picture is the book's cover image proper, so a reader shows it on
+  // the shelf as well as on the first page. It rides outside `images`, which is
+  // the posts' own pictures and is numbered as it goes.
+  let coverJpeg: Uint8Array | null = null;
+  if (settings.coverPage && cover) {
+    onProgress("Fetching the cover picture…");
+    const prepared = await prepareImage(cover.imageUrl, COVER_MAX_PX);
+    if (prepared) coverJpeg = prepared.jpeg;
+    else logWarn("cover", `Could not fetch the cover picture (${cover.imageUrl}); left it out`);
+  }
   onProgress("Building EPUB…");
 
   const css = epubCss(settings);
@@ -67,14 +88,20 @@ export async function generateEpub(
     `<item id="css" href="style.css" media-type="text/css"/>`,
   ];
 
-  // Front matter: a title page and a contents page, matching the PDF's cover.
-  const coverHtml = settings.coverPage ? coverBody(sorted, range, publications.length) : null;
+  // Front matter: the cover, then the contents inside it, matching the PDF.
+  const coverHtml = settings.coverPage ? coverBody(sorted, coverJpeg ? cover : null) : null;
   if (coverHtml) {
     files[`${OPS}/cover.xhtml`] = strToU8(xhtmlDocument(title, coverHtml, "style.css"));
     manifest.push(`<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>`);
     spine.push(`<itemref idref="cover"/>`);
     // The nav document doubles as a readable contents page.
     spine.push(`<itemref idref="nav"/>`);
+  }
+  if (coverJpeg) {
+    files[`${OPS}/${COVER_HREF}`] = [coverJpeg, { level: 0 }];
+    manifest.push(
+      `<item id="cover-image" href="${COVER_HREF}" media-type="image/jpeg" properties="cover-image"/>`
+    );
   }
 
   for (const ch of chapters) {
@@ -92,18 +119,27 @@ export async function generateEpub(
   }
 
   const bookId = uuidUrn();
+  const credit = coverJpeg && cover ? creditBody(cover) : null;
   files[`${OPS}/nav.xhtml`] = strToU8(
-    xhtmlDocument("Contents", navBody(chapters, !!coverHtml), "style.css")
+    xhtmlDocument("Contents", navBody(chapters, !!coverHtml, credit), "style.css")
   );
   files[`${OPS}/toc.ncx`] = strToU8(ncx(bookId, title, chapters, !!coverHtml));
   files[`${OPS}/package.opf`] = strToU8(
-    packageOpf({ bookId, title, creators, posts: sorted, manifest, spine })
+    packageOpf({
+      bookId,
+      title,
+      creators,
+      posts: sorted,
+      manifest,
+      spine,
+      hasCoverImage: coverJpeg !== null,
+    })
   );
 
   return {
     format: "epub",
     bytes: zipSync(files),
-    previewHtml: previewDocument(title, css, coverHtml, chapters, images),
+    previewHtml: previewDocument(title, css, coverHtml, chapters, images, credit, coverJpeg),
   };
 }
 
@@ -166,17 +202,45 @@ function chapterBody(post: DigestPost, id: string, resolveImage: ImageResolver):
   ].join("\n");
 }
 
-function coverBody(posts: DigestPost[], range: string, publicationCount: number): string {
-  const subtitle = `${range}   ·   ${plural(posts.length, "post")} from ${plural(
-    publicationCount,
-    "publication"
-  )}`;
+/**
+ * The book's first page: the masthead, and under it the picture the cover was
+ * built from. An e-reader owns its own page shape, so the picture is shown
+ * whole here rather than cropped to a page the way the PDF crops it.
+ */
+function coverBody(posts: DigestPost[], cover: CoverArtwork | null): string {
+  const subtitle = issueLine(posts);
   return [
     `<section class="cover" epub:type="titlepage">`,
     `<p class="kicker">SUBSTACK</p>`,
     `<h1>Digest</h1>`,
     `<hr class="rule"/>`,
     `<p class="subtitle">${esc(subtitle)}</p>`,
+    ...(cover
+      ? [
+          `<div class="cover-art">`,
+          `<img src="${esc(COVER_HREF)}" alt="${esc(coverAlt(cover))}"/>`,
+          `</div>`,
+        ]
+      : []),
+    `</section>`,
+  ].join("\n");
+}
+
+/** What a reader with the pictures turned off is told the cover is. */
+function coverAlt(cover: CoverArtwork): string {
+  return [cover.title || "The cover picture", cover.artist, cover.date].filter(Boolean).join(", ");
+}
+
+/**
+ * What the cover is, closing the contents page — the same lines the PDF prints
+ * under its own table of contents.
+ */
+function creditBody(cover: CoverArtwork): string {
+  const classOf = { title: "credit-title", body: "credit-line", muted: "credit-note" } as const;
+  return [
+    `<section class="credit">`,
+    `<p class="credit-head">${esc(CREDIT_HEADING)}</p>`,
+    ...coverCredit(cover).map((line) => `<p class="${classOf[line.weight]}">${esc(line.text)}</p>`),
     `</section>`,
   ].join("\n");
 }
@@ -206,8 +270,11 @@ function tocList(chapters: Chapter[], hrefFor: (ch: Chapter) => string | null): 
   return `  <ol>\n${items}\n  </ol>`;
 }
 
-/** The EPUB 3 navigation document: the reader's table of contents. */
-function navBody(chapters: Chapter[], hasCover: boolean): string {
+/**
+ * The EPUB 3 navigation document: the reader's table of contents, with the
+ * cover's credit at the foot of it.
+ */
+function navBody(chapters: Chapter[], hasCover: boolean, credit: string | null): string {
   const landmarks = [
     ...(hasCover ? [`    <li><a epub:type="cover" href="cover.xhtml">Cover</a></li>`] : []),
     `    <li><a epub:type="toc" href="nav.xhtml">Contents</a></li>`,
@@ -220,6 +287,7 @@ function navBody(chapters: Chapter[], hasCover: boolean): string {
   <h1>Contents</h1>
 ${tocList(chapters, (ch) => ch.file)}
 </nav>
+${credit ?? ""}
 <nav epub:type="landmarks" id="landmarks" hidden="hidden">
   <h2>Landmarks</h2>
   <ol>
@@ -249,9 +317,19 @@ interface OpfInput {
   posts: DigestPost[];
   manifest: string[];
   spine: string[];
+  /** Whether a cover picture went into the archive. */
+  hasCoverImage: boolean;
 }
 
-function packageOpf({ bookId, title, creators, posts, manifest, spine }: OpfInput): string {
+function packageOpf({
+  bookId,
+  title,
+  creators,
+  posts,
+  manifest,
+  spine,
+  hasCoverImage,
+}: OpfInput): string {
   const credits = creators
     .map((c, i) => `    <dc:creator id="creator${i + 1}">${esc(c)}</dc:creator>`)
     .join("\n");
@@ -265,7 +343,9 @@ function packageOpf({ bookId, title, creators, posts, manifest, spine }: OpfInpu
 ${credits}
     <dc:date>${isoDay(newest)}</dc:date>
     <dc:publisher>Sub Digest</dc:publisher>
-    <meta property="dcterms:modified">${timestamp()}</meta>
+    <meta property="dcterms:modified">${timestamp()}</meta>${
+    hasCoverImage ? '\n    <meta name="cover" content="cover-image"/>' : ""
+  }
   </metadata>
   <manifest>
 ${manifest.map((item) => `    ${item}`).join("\n")}
@@ -324,18 +404,28 @@ function previewDocument(
   css: string,
   coverHtml: string | null,
   chapters: Chapter[],
-  images: Map<string, EpubImage>
+  images: Map<string, EpubImage>,
+  credit: string | null,
+  coverJpeg: Uint8Array | null
 ): string {
   const dataUrls = new Map<string, string>();
   for (const [src, img] of images) dataUrls.set(src, jpegDataUrl(img.jpeg));
 
+  // The archive isn't unpacked anywhere the frame can reach, so the cover's own
+  // reference to it is swapped for the picture itself.
+  const cover =
+    coverHtml && coverJpeg
+      ? coverHtml.replace(`src="${COVER_HREF}"`, `src="${jpegDataUrl(coverJpeg)}"`)
+      : coverHtml;
+
   // The contents page is part of the book, so the preview shows it too.
   const contents = coverHtml
-    ? `<nav id="toc">\n  <h1>Contents</h1>\n${tocList(chapters, () => null)}\n</nav>`
+    ? `<nav id="toc">\n  <h1>Contents</h1>\n${tocList(chapters, () => null)}\n</nav>` +
+      (credit ? `\n${credit}` : "")
     : null;
 
   const sheets = [
-    ...(coverHtml ? [coverHtml] : []),
+    ...(cover ? [cover] : []),
     ...(contents ? [contents] : []),
     ...chapters.map((ch) =>
       chapterBody(ch.post, `preview-${ch.id}`, (src) => dataUrls.get(src) ?? null)
@@ -384,10 +474,6 @@ function jpegDataUrl(bytes: Uint8Array): string {
 
 function pad(n: number): string {
   return String(n).padStart(3, "0");
-}
-
-function plural(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 /** `dcterms:modified` must be a whole-second UTC timestamp. */

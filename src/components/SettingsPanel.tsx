@@ -64,21 +64,16 @@ export function SettingsPanel({ settings, onChange }: Props) {
               ))}
             </select>
           </label>
-          <label className="check">
+          <label
+            className="check"
+            title="Also leaves the inside cover blank, so the contents open two pages in"
+          >
             <input
               type="checkbox"
               checked={settings.bookletImposition}
               onChange={(e) => set("bookletImposition", e.target.checked)}
             />
             Booklet imposition (2-up, saddle stitch)
-          </label>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={settings.coverPage}
-              onChange={(e) => set("coverPage", e.target.checked)}
-            />
-            Cover with table of contents
           </label>
           <label className="check">
             <input
@@ -92,17 +87,10 @@ export function SettingsPanel({ settings, onChange }: Props) {
       ) : (
         <fieldset>
           <legend>Book</legend>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={settings.coverPage}
-              onChange={(e) => set("coverPage", e.target.checked)}
-            />
-            Title page and contents
-          </label>
           <p className="hint">
             One chapter per post. Pages, margins and type size belong to the reading
-            device, so the e-book leaves them to it.
+            device, so the e-book leaves them to it. The cover and its contents are set
+            in the step before this one.
           </p>
         </fieldset>
       )}
