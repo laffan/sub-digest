@@ -4,6 +4,7 @@ mod log;
 mod met;
 mod oauth;
 mod print;
+mod saved;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -13,6 +14,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .manage(gmail::AuthState::default())
         .manage(gmail::ConnectState::default())
+        .manage(saved::SavedState::default())
         .setup(|app| {
             // Route OAuth redirects delivered by custom URL scheme (iOS) into
             // the pending sign-in. Harmless on desktop, where loopback is used.
@@ -34,6 +36,12 @@ pub fn run() {
             gmail::gmail_get_body,
             gmail::fetch_image,
             gmail::save_file,
+            saved::saved_request_link,
+            saved::saved_sign_in,
+            saved::saved_status,
+            saved::saved_sign_out,
+            saved::saved_collect,
+            saved::saved_fetch,
             met::met_search,
             print::print_file,
             anthropic::anthropic_test,

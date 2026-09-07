@@ -1,15 +1,24 @@
 # Sub Digest
 
-A [Tauri 2](https://v2.tauri.app) app for macOS and iPadOS that turns the
-Substack newsletters in your Gmail inbox into a printable PDF booklet — a
-little magazine of your recent reading — or an EPUB for your e-reader.
+A [Tauri 2](https://v2.tauri.app) app for macOS and iPadOS that turns your
+recent reading into a printable PDF booklet — a little magazine of it — or an
+EPUB for your e-reader. The reading comes from one of two places: the
+newsletters in your Gmail inbox, or a list you keep on a site — the posts you
+pressed **Save** on in Substack, say.
 
 ## What it does
 
-1. **Connect Gmail** — sign in with Google (OAuth, read-only scope). You
+1. **Choose an input** — where this session's reading comes from, at the top of
+   the first step. **Gmail** finds the newsletters your filters match in your
+   mailbox; **Saved List** signs in to a site and collects one of the lists you
+   keep there. A session collects from one of them, so switching inputs clears
+   what the other found — a selection made of both would be one nobody could
+   reason about. Everything after this step is the same work either way, and
+   steps 2–3 below are the Gmail input, 4 the saved-list one.
+2. **Connect Gmail** — sign in with Google (OAuth, read-only scope). You
    provide your own OAuth client ID/secret; tokens are stored locally on the
    device and mail is only ever read, never modified.
-2. **Scan** — finds every email your **filters** match, across your whole
+3. **Scan** — finds every email your **filters** match, across your whole
    mailbox (archived mail included, not just the inbox) within a timeframe you
    choose — from the last 7 days up to All time, or **Range…** for an explicit
    start and end date (both days included) — and groups it by publication.
@@ -65,7 +74,14 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    matches the name on a From header as well as the address, so the
    publication's name is enough to find it. It keeps finding what it found,
    and reading it how it read it.
-3. **Select** — check/uncheck whole publications or individual posts, or
+4. **Collect a saved list** — the other way in. Sign in to a site, pick one of
+   its lists, and the articles on it are fetched from the site itself and
+   scraped into entries — the same scrape the AI agent's link roundups get, so
+   a saved post and a linked one arrive in the digest as the same kind of
+   thing. It isn't Substack-only: a source is a recipe rather than code, and
+   adding another site is filling in a form. See [The Saved List
+   input](#the-saved-list-input).
+5. **Select** — check/uncheck whole publications or individual posts, or
    **shift-click** a post to select (or deselect) everything between it and
    your last click, across publications. Posts already fetched and parsed in an
    earlier session are shown at half strength, so what's new stands out. It's a
@@ -86,7 +102,7 @@ little magazine of your recent reading — or an EPUB for your e-reader.
    agent costs one short model call per newsletter rather than a minute of it
    retyping the articles. A newsletter with no article links is noted in the
    log and falls through to the normal parser.
-4. **Generate** — pick **PDF** or **EPUB** at the top of the middle column;
+6. **Generate** — pick **PDF** or **EPUB** at the top of the middle column;
    both take the same posts in the order set in **Organize**.
 
    - **PDF** — a custom layout engine flows the posts (publication name, title,
@@ -119,7 +135,7 @@ little magazine of your recent reading — or an EPUB for your e-reader.
 The window has one working column beside the preview, and it moves through
 four steps in order, each with a link back:
 
-1. **Select** — the account and the discovered posts.
+1. **Select** — the input, the account it uses, and what it found.
 2. **Organize** — every selected post is fetched and parsed here, one at a
    time, with progress at the top of the column and the running order below it.
    Each row is one entry in the digest — for agent-processed newsletters, one
@@ -194,6 +210,102 @@ running commentary — each model turn with its timing and token counts, every
 page it fetches, retries, and anything that fails. It's the place to look when
 a newsletter comes out wrong. **Copy** puts the whole log on the clipboard.
 
+## The Saved List input
+
+Substack's **Save** button collects posts to read later, and there's no way to
+get that list out again — no export, no feed, no API. The same is true of every
+other site with a *save*, a *read later* or a *bookmarks* page. So this input
+does the only thing that works for all of them: it signs in as you, reads the
+list, and fetches each article the way the digest fetches anything else.
+
+None of it is Substack-specific. A **source** is a recipe rather than code — a
+site, how to sign in to it, and one or more **lists**, each an address and how
+to read what comes back — so adding another site is filling in a form under
+**Sources**, and Substack is one recipe among them rather than the point of the
+feature. Correcting a Substack address when Substack moves it is a paste, which
+matters more than it sounds: the addresses shipped are the ones its own reader
+calls, and nothing obliges it to keep them.
+
+### Signing in
+
+Sign-in is HTTP in the backend rather than a browser window the app opens. That
+is deliberate, and it's what makes the input work the same on a Mac and on an
+iPad: there's no second webview to create and no browser cookie jar to reach
+into, both of which are desktop-only tricks. A site offers whichever of these
+its recipe knows about:
+
+| Way in | What you do | Good for |
+| --- | --- | --- |
+| **Sign-in link** | **Email me a sign-in link**, then paste the link back — *copy it, don't open it* | Substack and anything else that mails a magic link. The only one that needs nothing but your mail |
+| **Password** | Address and password, sent straight to the site | An account that has a password set. Nothing is stored but the session it hands back |
+| **Session cookie** | Paste a session cookie out of a browser's developer tools | Any site at all, including ones with no sign-in endpoint — but it needs a desktop browser to get at, so it's the Mac's escape hatch rather than the iPad's |
+
+A magic link is spent by whatever opens it first. Tap it in Mail and the session
+lands in Safari, where the app can't reach it — so press and hold the link
+(right-click on the Mac), choose **Copy Link**, and paste it in. Following it is
+what sets the session, and the app follows it itself, by hand, through every
+redirect, keeping the cookies each hop sets.
+
+What's kept afterwards is that cookie, and it's treated as the password it
+effectively is: stored in the app's data directory beside the Gmail token,
+written to the log by name only, and sent to the source's own domain and its
+subdomains, never anywhere else. **Sign out** discards it.
+
+### Lists
+
+A list is an address and a way of reading what's there, in one of two shapes:
+
+- **A list endpoint (JSON)** — what a site's own reader calls. The array of
+  items is found rather than configured: give it a path (`posts`) if you like,
+  and otherwise the longest array of objects in the answer is taken as the list.
+  Each row is read for a title, an address, a byline, a publication and a date
+  under any of the names sites commonly use, on the row itself or one level into
+  it — `{post: {title, canonical_url}}` reads the same as a flat row. A row with
+  no address isn't an article, and is skipped.
+- **A page of links (HTML)** — every link inside a container you name with a CSS
+  selector, its own text as the title. Blank takes every link on the page. This
+  is the shape to point at anything that has a page but no endpoint.
+
+Several addresses can be given, one per line, and they're tried in order until
+one answers with articles — so a site that renames an endpoint doesn't take the
+list with it. A `limit` already on the address is set to the number you asked
+for. Items the list dated are held to the session's timeframe; ones it didn't
+date are kept, since a list that doesn't say when something was saved can't be
+filtered by when.
+
+**Most recent** caps one collection at 25–500 articles, newest first.
+
+### What Substack ships with
+
+| List | Address |
+| --- | --- |
+| **Saved** | `substack.com/api/v1/inbox/top?inboxType=inbox&surface=inbox_saved&limit=50`, then two older spellings |
+| **Inbox** | `substack.com/api/v1/inbox/top?inboxType=inbox&surface=inbox_all&limit=50` |
+
+Sign-in posts to `/api/v1/email-login` for a link or `/api/v1/login` for a
+password, and the session is checked against `/api/v1/user/profile/self`, which
+is also where the account name on screen comes from. Substack publishes none of
+this and guarantees none of it. If **Saved** comes back empty, the log names the
+address it tried and what came back; open substack.com/saved in a browser with
+the network tab open, find the request the page makes, and paste its address
+into the list under **Sources**.
+
+### Reading the articles
+
+A collected article is fetched from the site and scraped by the same code that
+reads the links out of an AI-agent newsletter: the body copy is located, taken
+as Markdown with its images, and page furniture dropped. The session rides along
+when the article is on the source's own domain, which is what gets a
+subscriber-only post back as the text you're entitled to rather than a paywall
+notice. An article that can't be fetched is logged and left out rather than
+becoming an entry with a title and nothing under it.
+
+The AI agent has no part in this input, and needs no API key: the agent exists
+to find links inside a newsletter, and a saved list has already done that.
+*Remember removed content* likewise belongs to a mail filter, and a saved
+article was found by no filter — striking things out of one works, but nothing
+is remembered between runs.
+
 ## Setup
 
 ### Prerequisites
@@ -204,6 +316,10 @@ a newsletter comes out wrong. **Copy** puts the whole log on the clipboard.
   <https://v2.tauri.app/start/prerequisites/>
 
 ### Google OAuth credentials
+
+Only the **Gmail** input needs these. The **Saved List** input needs no
+credentials, no `.env` entry and no Cloud Console setup at all — you sign in to
+the site from inside the app, and what it keeps is that site's own session.
 
 The app uses the Gmail API with your own OAuth client:
 
@@ -331,6 +447,14 @@ Three iOS-specific setup steps (done once, on the Mac):
 The loopback flow still works in the **iPad simulator**, so you can develop the
 whole app there before wiring the iOS client for on-device/TestFlight builds.
 
+The **Saved List** input needs none of this. Its sign-in is HTTP in the Rust
+backend — a link followed by hand, a form posted, or a cookie pasted — so there
+is no redirect to register, no second webview to open (which Tauri only offers
+on desktop anyway), and no platform-specific code: the same three ways in work
+identically on both. On an iPad the practical one is the sign-in link, since
+copying a cookie out of a browser wants developer tools; press and hold the link
+in Mail and choose **Copy Link** rather than tapping it.
+
 > Note: the desktop loopback path is verified here (it compiles and runs on
 > Linux/macOS); the iOS deep-link path is fully written and type-checks, but the
 > `Info.plist` scheme registration and on-device redirect can only be verified on
@@ -387,6 +511,11 @@ Two things worth knowing about what comes out:
 | Gmail OAuth (PKCE) | `src-tauri/src/oauth.rs` | Shared PKCE/token core + desktop loopback flow (fixed 127.0.0.1 port) |
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
+| Inputs | `src/App.tsx`, `src/components/InputPicker.tsx` | The first step is a choice of where the session's reading comes from, and the two inputs meet at one shape: a post with a title, a publication and a date, whether it came out of a mailbox or off a list. Only two places know the difference — the panel that collects, and the line in `organize` that decides whether a post is read by fetching an email or by scraping an address. Switching inputs clears what the other found rather than merging them: the steps after this one are about a selection, and a selection made of both would be one nobody could reason about |
+| Saved-list sources | `src/sources.ts`, `src/components/SourceEditorModal.tsx` | A source is a recipe, not code: a domain, the endpoints its sign-in uses, and its lists. That's what keeps the input from being Substack-only — another site is a form, and an address a site has moved is a paste. Substack ships as a recipe like any other, with several addresses per list tried in order, because it publishes no API and the ones it ships with are what its own reader happens to call |
+| Saved-list sign-in | `src-tauri/src/saved.rs` | Three ways in, all of them plain HTTP so that a Mac and an iPad do the same thing: follow a pasted magic link by hand through its redirects and keep the cookies each hop sets; post an address and password; or take a cookie pasted out of a browser. A second webview would be the nicer flow and is desktop-only, which is exactly why it isn't the one. Cookies are stored beside the Gmail token, logged by name only, sent to the source's domain and its subdomains alone, and replaced when a site rotates them mid-request. Unit-tested |
+| Reading a list | `src-tauri/src/saved.rs` | Deliberately not a set of per-site JSON paths. The array of items is found — the longest array of objects in the answer — and each row is read for a title, address, byline, publication and date under the names sites commonly use, on the row or one level into it, so `{post: {…}}` and a flat row read alike. Dates arrive as ISO, seconds or millis. A row with no address is not an article. The HTML shape takes the links inside a container you name, deciding by the selector's *last* simple part whether you meant anchors or the thing around them. Unit-tested |
+| Saved articles → entries | `src-tauri/src/saved.rs`, `src-tauri/src/anthropic.rs` (`fetch_article`) | The same scrape the agent's link roundups get — body-copy detection, images, furniture dropped — so a saved post and a linked one are the same kind of thing by the time they reach the running order. The session cookie rides along only when the article is on the source's own domain, which is what gets a subscriber-only post back whole — and a redirect off that host drops it, since reqwest strips `Cookie` when a redirect crosses hosts, so a wrapper can't carry the session somewhere it doesn't belong. One unfetchable article is logged and left out rather than failing the run |
 | Mail filters | `src/filters.ts`, `src/components/FilterEditorModal.tsx` | The saved filters — what to find, whether the agent reads it, and what it remembers taking out of it — their storage, and the migration from the sender-domain list and per-publication agent settings that came before. Values are normalized on the way in: a pasted `https://ghost.io/blog` becomes `ghost.io`, `Nate <news@example.com>` becomes the address, and a sender's *name* keeps its spaces and capitals, since Gmail matches those too and it's read back in the editor |
 | Filters → Gmail queries | `src-tauri/src/gmail.rs` | Domains, addresses and sender names are alternatives on one `from:` (no message is from two senders); subject slices become `subject:("…" OR "…")`, search terms bare phrases, and the kinds are ANDed. Each **enabled filter runs as its own query** rather than one big OR — a search term matches the body, so which filter caught a message can't be worked out from its headers afterwards, and every message has to come back knowing. Ids are unioned first and headers fetched once, so a message two filters found still costs one metadata request. Quotes are what delimits a phrase, so they're stripped from the text rather than escaped, and a `from:` operand that would need quoting is dropped instead — a filter can't break out of its own query. Unit-tested |
 | Which filter reads a post | `src/filters.ts` (`decidingFilter`) | A message can match several filters, and one of them has to decide whether the agent runs. An agentic filter wins — carving the roundups out with a filter of their own is exactly what one is for, so it shouldn't lose to the broad filter that happens to catch them too — and otherwise it's the first in the user's own order. The scan list applies the same rule up front, so the `agent` marks there are what a run will actually do |
@@ -418,7 +547,7 @@ files stay small; text outside WinAnsi (emoji, CJK) is dropped from output.
 EPUBs are UTF-8 and name font *families* rather than embedding fonts, so
 nothing is dropped and the files stay small too.
 
-## Troubleshooting sign-in
+## Troubleshooting Gmail sign-in
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
@@ -428,10 +557,30 @@ nothing is dropped and the files stay small too.
 | "Google did not return a refresh token" | The app was previously authorized | Remove it at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) and connect again |
 | App stays on "Waiting for Google…" | Sign-in was blocked on Google's side (e.g. access_denied) and never redirected back | Click **Cancel** (frees the port), resolve the error above, then **Connect Gmail** again |
 
+## Troubleshooting a saved list
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| "didn't hand back a session" after pasting a link | The link had already been opened, and a magic link is spent by whatever opens it first | Ask for a new one, and **copy** it rather than tapping it |
+| "that link isn't on …" | The pasted link is on a different site than the source | Paste the link the source itself mailed you |
+| "the session has expired. Sign in again." | The site stopped accepting the cookie — signed out elsewhere, or rotated | **Sign out** and sign in again |
+| The list comes back empty, or "nothing that looks like a list of items" | The address the recipe ships with isn't the one the site uses any more | Open the list in a browser with the network tab open, copy the address the page requests, and paste it into the list under **Sources**. The log names every address tried and what each answered |
+| Articles arrive as a paywall notice | The article is on a different domain than the session covers | Check the source's site under **Sources**: cookies are only sent to that domain and its subdomains |
+
 ## Privacy
 
 - Read-only Gmail scope; nothing is written to your mailbox.
 - OAuth tokens are stored in the app's local data directory only.
+- A **saved list** sign-in keeps that site's own session cookie, in the same
+  local directory. It grants whatever your account can do, so it's handled as a
+  password: written to the log by name only, never its value, and sent to the
+  source's domain and its subdomains alone — never to an article hosted
+  somewhere else, and never anywhere the recipe didn't name. **Sign out**
+  discards it. A password typed into the password flow is posted to the site and
+  not stored at all; what's kept is the session it returns.
+- Collecting a list talks to that site and to the sites its articles are on, and
+  to nothing else. Nothing about your mail goes near it, and the input does
+  nothing at all until you sign in.
 - The record of which posts you've already processed is message ids on this
   device, nothing more — no subjects, no content — and Settings clears it.
 - Email content and images are fetched directly from Google/Substack CDNs and

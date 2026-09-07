@@ -153,9 +153,9 @@ pub struct AgentEntry {
 /// wrapper and the query-string retry, so it's the article's own address rather
 /// than the newsletter's — and the page as Markdown.
 #[derive(Debug, Clone)]
-struct Article {
-    url: String,
-    markdown: String,
+pub(crate) struct Article {
+    pub(crate) url: String,
+    pub(crate) markdown: String,
 }
 
 /// Dedicated HTTP client (no default UA — set per request for scraping).
@@ -192,7 +192,7 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
 /// Spells out *why* a request failed. reqwest's own message stops at
 /// "error sending request for url (…)", which names no cause; the DNS, TLS or
 /// connection detail that identifies the problem is down the source chain.
-fn describe(err: &reqwest::Error) -> String {
+pub(crate) fn describe(err: &reqwest::Error) -> String {
     let mut out = err.to_string();
     let mut source = std::error::Error::source(err);
     while let Some(cause) = source {
@@ -543,7 +543,7 @@ async fn run_agent(
     let sel = selector.as_deref();
     let articles: Vec<(LinkItem, Result<Article, String>)> =
         futures::stream::iter(links.into_iter().map(|link| async move {
-            let article = resolve_and_fetch(app, &link.url, sel).await;
+            let article = fetch_article(app, &link.url, sel, None).await;
             (link, article)
         }))
         .buffered(MAX_CONCURRENT_FETCHES)
@@ -733,15 +733,20 @@ fn parse_link_response(text: &str) -> Result<(Vec<LinkItem>, Option<String>), St
 /// where the bare URL serves the article. Falls back to whatever the original
 /// URL gave if the trimmed one doesn't work out. Every step is logged, since
 /// which URL was actually read is the thing worth being able to check.
-async fn resolve_and_fetch(
+///
+/// Both inputs that end up with an article's address come through here — the
+/// agent's link roundups and the saved-list input — so a saved post and a
+/// linked one arrive in the digest as the same kind of thing.
+pub(crate) async fn fetch_article(
     app: &AppHandle,
     requested: &str,
     selector: Option<&str>,
+    cookie: Option<&str>,
 ) -> Result<Article, String> {
     let started = Instant::now();
     log::info(app, "fetch", format!("GET {}", log::ellipsize(requested, 140)));
 
-    let (landed, page) = fetch_url(requested, selector).await.map_err(|e| {
+    let (landed, page) = fetch_url(requested, selector, cookie).await.map_err(|e| {
         log::warn(
             app,
             "fetch",
@@ -757,7 +762,7 @@ async fn resolve_and_fetch(
     // Retry on the bare URL when the destination carries a query string.
     if let Some(bare) = without_query(&landed) {
         log::info(app, "fetch", format!("  retrying without query: {}", log::ellipsize(bare.as_str(), 140)));
-        match fetch_url(bare.as_str(), selector).await {
+        match fetch_url(bare.as_str(), selector, cookie).await {
             Ok((_, clean)) if !clean.markdown.trim().is_empty() => {
                 report_page(app, bare.as_str(), &clean, started);
                 return Ok(Article { url: bare.to_string(), markdown: clean.markdown });
@@ -808,7 +813,7 @@ fn without_query(url: &url::Url) -> Option<url::Url> {
     Some(bare)
 }
 
-fn host_blocked(host: &str) -> bool {
+pub(crate) fn host_blocked(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     if h == "localhost" || h.ends_with(".localhost") {
         return true;
@@ -824,7 +829,11 @@ fn host_blocked(host: &str) -> bool {
 
 /// Fetches one URL and returns the URL it actually landed on together with the
 /// page's readable content.
-async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, Extracted), String> {
+async fn fetch_url(
+    url: &str,
+    selector: Option<&str>,
+    cookie: Option<&str>,
+) -> Result<(url::Url, Extracted), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("only http(s) URLs can be fetched".to_string());
@@ -833,10 +842,17 @@ async fn fetch_url(url: &str, selector: Option<&str>) -> Result<(url::Url, Extra
         return Err("refusing to fetch a private or loopback address".to_string());
     }
 
-    let resp = http()
+    let mut req = http()
         .get(parsed)
         .header("user-agent", BROWSER_UA)
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS)) // a slow page shouldn't hold up the run
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS)); // a slow page shouldn't hold up the run
+    // A saved post can be subscriber-only, and the session the user signed in
+    // with is what makes it readable. It only ever rides along to the domain
+    // that issued it — `saved.rs` decides that, and passes None otherwise.
+    if let Some(cookie) = cookie {
+        req = req.header("cookie", cookie);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("fetch failed: {}", describe(&e)))?;

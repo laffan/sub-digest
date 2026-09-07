@@ -1,71 +1,35 @@
-import { useMemo, useRef, useState } from "react";
-import { activeFilters, filterIsEmpty, filterLabel, filterSummary } from "../filters";
-import {
-  CUSTOM_RANGE,
-  type DateRange,
-  type MailFilter,
-  type Post,
-  type Publication,
-} from "../types";
+import { useMemo, useRef } from "react";
+import type { Post, Publication } from "../types";
 
 interface Props {
   posts: Post[];
-  days: number;
-  range: DateRange;
-  rangeValid: boolean;
-  scanning: boolean;
   /** Ids of posts the agent will read, from the filter that found each. */
   agentPosts: ReadonlySet<string>;
-  /** Every saved filter; a scan uses the enabled ones. */
-  filters: MailFilter[];
   /** Posts read in an earlier session — shown at half strength, nothing more. */
   processed: ReadonlySet<string>;
-  onDaysChange: (days: number) => void;
-  onRangeChange: (range: DateRange) => void;
-  onToggleFilter: (id: string, enabled: boolean) => void;
-  onEditFilters: () => void;
-  onScan: () => void;
+  /** Most posts one collection can return; a full list says so. */
+  limit: number;
   onTogglePost: (id: string) => void;
   onSetPostsSelected: (ids: string[], selected: boolean) => void;
   onTogglePublication: (name: string, selected: boolean) => void;
 }
 
-// `days: 0` means no lower bound — search the entire archive.
-// `days: CUSTOM_RANGE` swaps the timeframe for an explicit start/end date.
-const TIMEFRAMES: { label: string; days: number }[] = [
-  { label: "Last 7 days", days: 7 },
-  { label: "Last 14 days", days: 14 },
-  { label: "Last 30 days", days: 30 },
-  { label: "Last 3 months", days: 90 },
-  { label: "Last 6 months", days: 183 },
-  { label: "Last year", days: 365 },
-  { label: "Last 2 years", days: 730 },
-  { label: "All time", days: 0 },
-  { label: "Range…", days: CUSTOM_RANGE },
-];
-
-/** Matches MAX_MESSAGES in the Rust backend. */
-const SCAN_LIMIT = 1000;
-
+/**
+ * What an input found, grouped by publication and ready to be picked over.
+ *
+ * Both inputs land here: an email and a saved article are the same shape by the
+ * time they reach it — a title, a publication, a date — so selecting works one
+ * way whichever step produced the list.
+ */
 export function PostList({
   posts,
-  days,
-  range,
-  rangeValid,
-  scanning,
   agentPosts,
-  filters,
   processed,
-  onDaysChange,
-  onRangeChange,
-  onToggleFilter,
-  onEditFilters,
-  onScan,
+  limit,
   onTogglePost,
   onSetPostsSelected,
   onTogglePublication,
 }: Props) {
-  const [filtersOpen, setFiltersOpen] = useState(false);
   // The post a shift-click extends the selection from: the last one clicked.
   const anchorId = useRef<string | null>(null);
   // A checkbox's change event carries no modifier keys, and React derives that
@@ -103,146 +67,15 @@ export function PostList({
     return true;
   };
 
-  const usingRange = days === CUSTOM_RANGE;
-  // What a scan would actually use: enabled, and with something to match on.
-  const willScanWith = useMemo(() => activeFilters(filters), [filters]);
+  if (posts.length === 0) return null;
 
   return (
-    <section className="panel posts">
-      <div className="posts-head">
-        <h2 className="col-title">Posts</h2>
-        <div className="filters-anchor">
-          <button
-            className={`filters-btn${filtersOpen ? " active" : ""}`}
-            onClick={() => setFiltersOpen((v) => !v)}
-            aria-expanded={filtersOpen}
-            title="Which filters a scan uses"
-          >
-            Filters
-            <span className="filters-count">
-              {willScanWith.length}/{filters.length}
-            </span>
-          </button>
+    <section className="panel results">
+      <p className="hint">Shift-click to select through to your last click.</p>
 
-          {filtersOpen && (
-            <>
-              <div className="menu-scrim" onClick={() => setFiltersOpen(false)} />
-              <div className="filter-menu" role="menu">
-                {filters.length === 0 ? (
-                  <p className="hint filter-menu-empty">No filters yet.</p>
-                ) : (
-                  <ul className="filter-menu-list">
-                    {filters.map((f) => (
-                      <li key={f.id}>
-                        <label className="menu-check">
-                          <input
-                            type="checkbox"
-                            checked={f.enabled}
-                            onChange={(e) => onToggleFilter(f.id, e.target.checked)}
-                          />
-                          <span className="filter-menu-text">
-                            <span className="filter-menu-name">
-                              {filterLabel(f)}
-                              {f.useAgent && (
-                                <span className="agent-tag" title="Read by the AI agent">
-                                  agent
-                                </span>
-                              )}
-                            </span>
-                            <span className="filter-menu-summary">{filterSummary(f)}</span>
-                          </span>
-                        </label>
-                        {f.enabled && filterIsEmpty(f) && (
-                          <span className="filter-menu-warn">nothing to match on</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <button
-                  className="menu-item edit-filters"
-                  onClick={() => {
-                    setFiltersOpen(false);
-                    onEditFilters();
-                  }}
-                >
-                  Edit Filters…
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="scan-row">
-        <select value={days} onChange={(e) => onDaysChange(Number(e.target.value))}>
-          {TIMEFRAMES.map((t) => (
-            <option key={t.days} value={t.days}>
-              {t.label}
-            </option>
-          ))}
-        </select>
-        <button
-          className="secondary"
-          disabled={scanning || !rangeValid || willScanWith.length === 0}
-          onClick={onScan}
-          title={
-            willScanWith.length === 0 ? "Enable a filter to scan with" : "Search your whole mailbox"
-          }
-        >
-          {scanning ? "Scanning…" : "Scan Mail"}
-        </button>
-      </div>
-
-      {willScanWith.length === 0 && (
-        <p className="hint warn">
-          {filters.length === 0
-            ? "No filters yet — add one under Filters to scan."
-            : "No filter is enabled — pick one under Filters to scan."}
-        </p>
-      )}
-
-      {usingRange && (
-        <div className="range-row">
-          <label>
-            From
-            <input
-              type="date"
-              value={range.start}
-              max={range.end || undefined}
-              onChange={(e) => onRangeChange({ ...range, start: e.target.value })}
-            />
-          </label>
-          <label>
-            To
-            <input
-              type="date"
-              value={range.end}
-              min={range.start || undefined}
-              onChange={(e) => onRangeChange({ ...range, end: e.target.value })}
-            />
-          </label>
-        </div>
-      )}
-
-      {usingRange && !rangeValid && (
-        <p className="hint warn">Pick a start and end date (start first) to scan a range.</p>
-      )}
-
-      {posts.length === 0 && !scanning && willScanWith.length > 0 && (
+      {posts.length >= limit && (
         <p className="hint">
-          Scan your mail for anything your filters match (archived mail included).
-        </p>
-      )}
-
-      {posts.length > 0 && (
-        <p className="hint">Shift-click to select through to your last click.</p>
-      )}
-
-      {posts.length >= SCAN_LIMIT && (
-        <p className="hint">
-          Showing the first {SCAN_LIMIT.toLocaleString()} matches — narrow the timeframe to
-          reach older ones.
+          Showing the first {limit.toLocaleString()} — narrow the timeframe to reach older ones.
         </p>
       )}
 

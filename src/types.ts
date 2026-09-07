@@ -15,10 +15,36 @@ export interface PostMeta {
   filterIds: string[];
 }
 
-/** A post with its publication name resolved and selection state. */
+/**
+ * Which input a session collects from. The first step of the app is a choice of
+ * where the reading comes from — the mailbox, or a list you keep on a site —
+ * and everything after it works on what that step produced, whichever it was.
+ */
+export type InputKind = "gmail" | "saved";
+
+/**
+ * A post with its publication name resolved and selection state.
+ *
+ * The fields past `selected` are what a saved-list item carries that an email
+ * doesn't: an article has an address of its own, and the list usually names its
+ * writer. `subject` is the title either way, so everything downstream — the
+ * scan list, the running order, the contents page — reads one shape.
+ */
 export interface Post extends PostMeta {
   publication: string;
   selected: boolean;
+  /** Which input found it. */
+  source: InputKind;
+  /** The article's own address; saved-list items only. */
+  url?: string;
+  /**
+   * The source it was collected from, so fetching it later uses that site's
+   * session rather than whichever source the picker happens to be showing by
+   * then. Saved-list items only.
+   */
+  sourceId?: string;
+  /** Who the list said wrote it, when it said. */
+  author?: string;
 }
 
 export interface Publication {

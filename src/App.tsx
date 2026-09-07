@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { AuthPanel } from "./components/AuthPanel";
+import { InputPicker } from "./components/InputPicker";
+import { MailPanel } from "./components/MailPanel";
 import { PostList } from "./components/PostList";
+import { SavedPanel } from "./components/SavedPanel";
+import { SourceEditorModal } from "./components/SourceEditorModal";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { FilterEditorModal } from "./components/FilterEditorModal";
@@ -24,6 +28,16 @@ import {
   loadFilters,
 } from "./filters";
 import { blockSignature, rememberedKeys, withSignatures } from "./remember";
+import { SOURCES_KEY, loadSources, type SavedSource, type SignInMethod } from "./sources";
+import {
+  savedCollect,
+  savedFetch,
+  savedRequestLink,
+  savedSignIn,
+  savedSignOut,
+  savedStatus,
+  type SignInDetails,
+} from "./saved";
 import { orderPosts, type PostOrder } from "./order";
 import { COVER_RESULTS, artworkLabel, metSearch } from "./met";
 import { markdownToBlocks } from "./parse";
@@ -53,6 +67,7 @@ import {
   type DateRange,
   type DigestPost,
   type GeneratedOutput,
+  type InputKind,
   type LayoutSettings,
   type MailFilter,
   type Post,
@@ -60,6 +75,14 @@ import {
 
 const SETTINGS_KEY = "subdigest.settings";
 const ANTHROPIC_KEY = "subdigest.anthropicKey";
+/** Which input the last session used; the app opens where it was left. */
+const INPUT_KEY = "subdigest.input";
+/** Matches MAX_MESSAGES in the Rust backend. */
+const SCAN_LIMIT = 1000;
+
+function loadInput(): InputKind {
+  return localStorage.getItem(INPUT_KEY) === "saved" ? "saved" : "gmail";
+}
 
 /** Document bytes as base64, which is how they cross into the backend. */
 function toBase64(bytes: Uint8Array): string {
@@ -82,8 +105,27 @@ function loadSettings(): LayoutSettings {
 }
 
 export default function App() {
+  // Where this session's reading comes from. One input at a time: what a step
+  // collects is what every step after it works on, and mixing two of them would
+  // mean a selection nobody could reason about.
+  const [input, setInput] = useState<InputKind>(loadInput);
+
   const [account, setAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+
+  // The saved-list input: the sites it knows about, which one is picked, and
+  // the session it has with that one. Sessions live in the backend — the most
+  // this side ever sees is the name of the account a sign-in landed on.
+  const [sources, setSources] = useState<SavedSource[]>(loadSources);
+  const [sourceId, setSourceId] = useState("");
+  const [listId, setListId] = useState("");
+  const [savedAccount, setSavedAccount] = useState<string | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  const [collecting, setCollecting] = useState(false);
+  // What the last sign-in step had to say — "check your mail", usually.
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [savedLimit, setSavedLimit] = useState(50);
+  const [showSources, setShowSources] = useState(false);
   const [days, setDays] = useState(30);
   // Only consulted when `days === CUSTOM_RANGE`; defaults to the last month.
   const [range, setRange] = useState<DateRange>(() => ({
@@ -191,6 +233,14 @@ export default function App() {
     localStorage.setItem(FILTERS_KEY, JSON.stringify(filters));
   }, [filters]);
 
+  useEffect(() => {
+    localStorage.setItem(SOURCES_KEY, JSON.stringify(sources));
+  }, [sources]);
+
+  useEffect(() => {
+    localStorage.setItem(INPUT_KEY, input);
+  }, [input]);
+
   // Switching format leaves the preview showing the other format's document.
   useEffect(() => {
     setOutput(null);
@@ -227,6 +277,50 @@ export default function App() {
   const saveAnthropicKey = useCallback((key: string) => {
     setAnthropicKey(key);
     localStorage.setItem(ANTHROPIC_KEY, key);
+  }, []);
+
+  // The source and list on screen: what's picked, or the first there is. A
+  // source removed in the editor leaves the picker on something real rather
+  // than on nothing.
+  const source = useMemo(
+    () => sources.find((s) => s.id === sourceId) ?? sources[0],
+    [sources, sourceId]
+  );
+  const list = useMemo(
+    () => source?.lists.find((l) => l.id === listId) ?? source?.lists[0],
+    [source, listId]
+  );
+
+  // Who the picked source is signed in as. The session is stored on the device,
+  // so it survives a restart the way the Gmail token does.
+  useEffect(() => {
+    const id = source?.id;
+    if (!id) {
+      setSavedAccount(null);
+      return;
+    }
+    let live = true;
+    savedStatus(id)
+      .then((who) => live && setSavedAccount(who))
+      .catch(() => live && setSavedAccount(null));
+    return () => {
+      live = false;
+    };
+  }, [source?.id]);
+
+  /**
+   * Switches inputs. What's on screen came from the other one, and a session
+   * collects from a single input, so it goes — nothing is silently carried
+   * across into a run that wouldn't know how to read it.
+   */
+  const chooseInput = useCallback((kind: InputKind) => {
+    setInput(kind);
+    setPosts([]);
+    setPrepared([]);
+    setOutput(null);
+    setError(null);
+    setSavedNotice(null);
+    setStep("select");
   }, []);
 
   const connect = useCallback(async () => {
@@ -285,11 +379,12 @@ export default function App() {
     );
     try {
       const metas = await gmailSearch(scanWindow.after, scanWindow.before, scanFilters);
-      const found = metas
+      const found: Post[] = metas
         .map((m) => ({
           ...m,
           publication: publicationFromHeader(m.from),
           selected: true,
+          source: "gmail" as const,
         }))
         .sort((a, b) => b.dateMs - a.dateMs);
       setPosts(found);
@@ -301,6 +396,121 @@ export default function App() {
       setScanning(false);
     }
   }, [scanWindow, scanFilters, fail]);
+
+  /**
+   * Signs in to the picked source. Which of the three ways in this is — a
+   * pasted link, a password, a pasted cookie — is the panel's business; all
+   * that comes back here is the account it landed on.
+   */
+  const signIn = useCallback(
+    async (method: SignInMethod, details: SignInDetails) => {
+      if (!source) return;
+      setError(null);
+      setSavedNotice(null);
+      setSigningIn(true);
+      try {
+        setSavedAccount(await savedSignIn(source, method, details));
+      } catch (e) {
+        fail("saved", e);
+      } finally {
+        setSigningIn(false);
+      }
+    },
+    [source, fail]
+  );
+
+  /** Asks the site to mail a sign-in link, so the flow starts inside the app. */
+  const requestLink = useCallback(
+    async (email: string) => {
+      if (!source) return;
+      setError(null);
+      setSigningIn(true);
+      try {
+        setSavedNotice(await savedRequestLink(source, email));
+      } catch (e) {
+        fail("saved", e);
+      } finally {
+        setSigningIn(false);
+      }
+    },
+    [source, fail]
+  );
+
+  const signOutSaved = useCallback(async () => {
+    if (!source) return;
+    await savedSignOut(source.id).catch(() => {});
+    setSavedAccount(null);
+    setSavedNotice(null);
+    setPosts([]);
+    setOutput(null);
+    setStep("select");
+    logInfo("saved", `Signed out of ${source.name}`);
+  }, [source]);
+
+  /**
+   * Collects the picked list: the articles on it, as posts. They arrive in the
+   * same shape a scanned email does, which is the whole point — everything
+   * after this step is the work it always was.
+   */
+  const collect = useCallback(async () => {
+    if (!source || !list || !scanWindow) return;
+    setError(null);
+    setCollecting(true);
+    logInfo("saved", `Collecting "${list.name || "list"}" from ${source.name}`);
+    try {
+      const items = await savedCollect(
+        source,
+        list,
+        savedLimit,
+        scanWindow.after,
+        scanWindow.before
+      );
+      // A list that doesn't say when something was saved leaves the date at 0,
+      // and an entry has to be dated: the byline under its title says when, and
+      // so does the span on the cover. The day it was collected is the honest
+      // answer to "when did this reach me", so that's what it gets — and the
+      // log says how many, since it's a stand-in rather than a fact.
+      const collectedAt = Date.now();
+      const undated = items.filter((item) => item.dateMs <= 0).length;
+      const found: Post[] = items
+        .map((item) => ({
+          id: item.id,
+          // Nothing reads this for a saved article — the byline and the
+          // publication are already their own fields — but it's what a From
+          // header is for, so it carries whoever the list named.
+          from: item.author || item.publication,
+          subject: item.title,
+          dateMs: item.dateMs > 0 ? item.dateMs : collectedAt,
+          filterIds: [],
+          publication: item.publication,
+          selected: true,
+          source: "saved" as const,
+          sourceId: source.id,
+          url: item.url,
+          author: item.author || undefined,
+        }))
+        .sort((a, b) => b.dateMs - a.dateMs);
+      setPosts(found);
+      const pubs = new Set(found.map((p) => p.publication));
+      logInfo(
+        "saved",
+        `Collected ${found.length} article${found.length === 1 ? "" : "s"} from ${pubs.size} ` +
+          `publication${pubs.size === 1 ? "" : "s"}`
+      );
+      if (undated > 0) {
+        logWarn(
+          "saved",
+          `${undated} article${undated === 1 ? " carried" : "s carried"} no date on the list — ` +
+            `dated today, so ${undated === 1 ? "it sits" : "they sit"} at the end of a ` +
+            `chronological digest`
+        );
+      }
+    } catch (e) {
+      fail("saved", e);
+    } finally {
+      setCollecting(false);
+    }
+  }, [source, list, savedLimit, scanWindow, fail]);
 
   const toggleFilter = useCallback((id: string, enabled: boolean) => {
     setFilters((fs) => fs.map((f) => (f.id === id ? { ...f, enabled } : f)));
@@ -333,9 +543,15 @@ export default function App() {
   }, [posts, filters]);
 
   /**
-   * Fetches and parses every selected post, one at a time, so the Organize
-   * step can show them arriving. Starts chronological; the user reorders from
-   * there. Runs once on entering Organize, not on every Generate.
+   * Fetches and reads every selected post, one at a time, so the Organize step
+   * can show them arriving. Starts chronological; the user reorders from there.
+   * Runs once on entering Organize, not on every Generate.
+   *
+   * How a post is read depends on where it came from. An email is fetched from
+   * Gmail and parsed — or handed to the agent, when the filter that found it
+   * says so. A saved article is fetched from the site itself and scraped, which
+   * is the same scrape the agent's link roundups get. Either way what comes out
+   * is entries, and nothing downstream has to know which it was.
    */
   const organize = useCallback(async () => {
     const selected = [...posts.filter((p) => p.selected)].sort((a, b) => a.dateMs - b.dateMs);
@@ -351,78 +567,119 @@ export default function App() {
     setPrepareTotal(selected.length);
     setPreparing(true);
     logInfo("render", `Preparing ${selected.length} posts`);
+
+    /** One saved article: fetched from the site, scraped, and that's the entry. */
+    const readSaved = async (p: Post): Promise<DigestPost[]> => {
+      if (!p.url) return [];
+      let markdown = bodyCache.current.get(p.id);
+      if (markdown === undefined) {
+        markdown = await savedFetch(p.sourceId ?? "", p.url);
+        bodyCache.current.set(p.id, markdown);
+      }
+      const blocks = markdownToBlocks(markdown, p.subject);
+      logInfo("parse", `"${p.subject}" → ${blocks.length} blocks`);
+      return [
+        {
+          id: p.id,
+          publication: p.publication,
+          title: p.subject,
+          author: p.author,
+          sourceUrl: p.url,
+          dateMs: p.dateMs,
+          blocks,
+        },
+      ];
+    };
+
+    /** One email: the body, then the agent or the parser, as its filter says. */
+    const readMail = async (p: Post, agent: MailFilter | undefined): Promise<DigestPost[]> => {
+      let body = bodyCache.current.get(p.id);
+      if (body === undefined) {
+        body = await gmailGetBody(p.id);
+        bodyCache.current.set(p.id, body);
+        logInfo("gmail", `Fetched "${p.subject}" (${body.length} chars)`);
+      }
+      /** The email itself as one entry — the fallback whenever no agent runs. */
+      const asPost = (): DigestPost[] => {
+        const isHtml = /<\/?[a-z][\s\S]*>/i.test(body!.slice(0, 500));
+        const blocks = isHtml ? parseEmailHtml(body!, p.subject) : parsePlainText(body!);
+        return [
+          {
+            id: p.id,
+            publication: p.publication,
+            filterId: agent?.id,
+            title: p.subject,
+            dateMs: p.dateMs,
+            blocks,
+          },
+        ];
+      };
+
+      if (!agent?.useAgent || !anthropicKey.trim()) {
+        const entries = asPost();
+        logInfo("parse", `"${p.subject}" → ${entries[0].blocks.length} blocks`);
+        return entries;
+      }
+
+      try {
+        const found = await anthropicProcess(anthropicKey, agent.instructions, p.subject, body);
+        // Each linked article stands on its own in the digest, under its own
+        // title and byline rather than the email's subject line.
+        const entries = found.map((entry, n) => ({
+          id: `${p.id}#${n}`,
+          publication: p.publication,
+          filterId: agent.id,
+          title: entry.title,
+          author: entry.author || undefined,
+          sourceUrl: entry.url,
+          dateMs: p.dateMs,
+          blocks: markdownToBlocks(entry.markdown, entry.title),
+        }));
+        logInfo(
+          "agent",
+          `"${p.subject}" → ${entries.length} article${entries.length === 1 ? "" : "s"}, ` +
+            `${entries.reduce((n, e) => n + e.blocks.length, 0)} blocks`
+        );
+        return entries;
+      } catch (e) {
+        // Fall back to the default parser rather than failing the whole run.
+        const detail = String(e);
+        if (/no article links/i.test(detail)) {
+          // Expected for anything that isn't a link roundup — note it and move on.
+          logWarn("agent", `No links found in "${p.subject}" — used default parsing`);
+        } else {
+          const message = `Agent failed for "${filterLabel(agent)}" — used default parsing. ${detail}`;
+          setError(message);
+          logError("agent", message);
+        }
+        return asPost();
+      }
+    };
+
     try {
       for (let i = 0; i < selected.length; i++) {
         const p = selected[i];
         report(`Fetching ${i + 1}/${selected.length}: ${p.subject}`);
-        let body = bodyCache.current.get(p.id);
-        if (body === undefined) {
-          body = await gmailGetBody(p.id);
-          bodyCache.current.set(p.id, body);
-          logInfo("gmail", `Fetched "${p.subject}" (${body.length} chars)`);
-        }
         // The filter that found this post decides how it's read — and it's the
-        // filter that remembers what gets struck out of it.
+        // filter that remembers what gets struck out of it. A saved article was
+        // found by no filter, so it has neither.
         const agent = decidingFilter(filters, p.filterIds);
-        /** The email itself as one entry — the fallback whenever no agent runs. */
-        const asPost = (): DigestPost[] => {
-          const isHtml = /<\/?[a-z][\s\S]*>/i.test(body!.slice(0, 500));
-          const blocks = isHtml ? parseEmailHtml(body!, p.subject) : parsePlainText(body!);
-          return [
-            {
-              id: p.id,
-              publication: p.publication,
-              filterId: agent?.id,
-              title: p.subject,
-              dateMs: p.dateMs,
-              blocks,
-            },
-          ];
-        };
         let entries = entryCache.current.get(p.id);
         if (entries === undefined) {
-          if (agent?.useAgent && anthropicKey.trim()) {
-            report(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
+          if (p.source === "saved") {
             try {
-              const found = await anthropicProcess(
-                anthropicKey,
-                agent.instructions,
-                p.subject,
-                body
-              );
-              // Each linked article stands on its own in the digest, under its
-              // own title and byline rather than the email's subject line.
-              entries = found.map((entry, n) => ({
-                id: `${p.id}#${n}`,
-                publication: p.publication,
-                filterId: agent.id,
-                title: entry.title,
-                author: entry.author || undefined,
-                sourceUrl: entry.url,
-                dateMs: p.dateMs,
-                blocks: markdownToBlocks(entry.markdown, entry.title),
-              }));
-              logInfo(
-                "agent",
-                `"${p.subject}" → ${entries.length} article${entries.length === 1 ? "" : "s"}, ` +
-                  `${entries.reduce((n, e) => n + e.blocks.length, 0)} blocks`
-              );
+              entries = await readSaved(p);
             } catch (e) {
-              // Fall back to the default parser rather than failing the whole run.
-              const detail = String(e);
-              if (/no article links/i.test(detail)) {
-                // Expected for anything that isn't a link roundup — note it and move on.
-                logWarn("agent", `No links found in "${p.subject}" — used default parsing`);
-              } else {
-                const message = `Agent failed for "${filterLabel(agent)}" — used default parsing. ${detail}`;
-                setError(message);
-                logError("agent", message);
-              }
-              entries = asPost();
+              // One unreachable article is not a failed run; the log names it
+              // and the digest goes on without it, as a dropped link does.
+              logError("saved", `Could not read "${p.subject}": ${e}`);
+              entries = [];
             }
           } else {
-            entries = asPost();
-            logInfo("parse", `"${p.subject}" → ${entries[0].blocks.length} blocks`);
+            if (agent?.useAgent && anthropicKey.trim()) {
+              report(`Agent processing ${i + 1}/${selected.length}: ${p.subject}`);
+            }
+            entries = await readMail(p, agent);
           }
           entryCache.current.set(p.id, entries);
         }
@@ -734,33 +991,73 @@ export default function App() {
         {step === "select" ? (
           <>
             <div className="step-body">
-              <AuthPanel
-                account={account}
-                connecting={connecting}
-                onConnect={connect}
-                onCancel={cancelConnect}
-                onDisconnect={disconnect}
+              <InputPicker
+                value={input}
+                onChange={chooseInput}
+                disabled={scanning || collecting}
               />
-              {account && (
-                <PostList
-                  posts={posts}
+
+              {input === "gmail" ? (
+                <>
+                  <AuthPanel
+                    account={account}
+                    connecting={connecting}
+                    onConnect={connect}
+                    onCancel={cancelConnect}
+                    onDisconnect={disconnect}
+                  />
+                  {account && (
+                    <MailPanel
+                      days={days}
+                      range={range}
+                      rangeValid={scanWindow !== null}
+                      scanning={scanning}
+                      filters={filters}
+                      found={posts.length}
+                      onDaysChange={setDays}
+                      onRangeChange={setRange}
+                      onToggleFilter={toggleFilter}
+                      onEditFilters={() => setShowFilters(true)}
+                      onScan={scan}
+                    />
+                  )}
+                </>
+              ) : (
+                <SavedPanel
+                  sources={sources}
+                  sourceId={source?.id ?? ""}
+                  onSourceChange={setSourceId}
+                  account={savedAccount}
+                  signingIn={signingIn}
+                  onSignIn={signIn}
+                  onRequestLink={requestLink}
+                  onSignOut={signOutSaved}
+                  listId={list?.id ?? ""}
+                  onListChange={setListId}
+                  limit={savedLimit}
+                  onLimitChange={setSavedLimit}
+                  collecting={collecting}
+                  onCollect={collect}
+                  onEditSources={() => setShowSources(true)}
+                  notice={savedNotice}
                   days={days}
                   range={range}
                   rangeValid={scanWindow !== null}
-                  scanning={scanning}
-                  agentPosts={agentPosts}
-                  filters={filters}
-                  processed={processedBefore}
                   onDaysChange={setDays}
                   onRangeChange={setRange}
-                  onToggleFilter={toggleFilter}
-                  onEditFilters={() => setShowFilters(true)}
-                  onScan={scan}
-                  onTogglePost={togglePost}
-                  onSetPostsSelected={setPostsSelected}
-                  onTogglePublication={togglePublication}
+                  found={posts.length}
                 />
               )}
+
+              <PostList
+                posts={posts}
+                agentPosts={agentPosts}
+                processed={processedBefore}
+                limit={input === "gmail" ? SCAN_LIMIT : savedLimit}
+                onTogglePost={togglePost}
+                onSetPostsSelected={setPostsSelected}
+                onTogglePublication={togglePublication}
+              />
             </div>
             {(posts.length > 0 || error) && (
               <div className="step-actions">
@@ -915,6 +1212,14 @@ export default function App() {
       </main>
 
       {showLog && <LogPane onClose={() => setShowLog(false)} />}
+
+      {showSources && (
+        <SourceEditorModal
+          sources={sources}
+          onChange={setSources}
+          onClose={() => setShowSources(false)}
+        />
+      )}
 
       {showFilters && (
         <FilterEditorModal
