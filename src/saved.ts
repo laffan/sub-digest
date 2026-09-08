@@ -9,12 +9,24 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
-/** Where the browser should sit, in CSS pixels from the window's top left. */
+/** Where the browser should sit, in CSS pixels from the page's top left. */
 export interface Rect {
   x: number;
   y: number;
   w: number;
   h: number;
+}
+
+/**
+ * The rectangle, plus the height of the page it was measured in.
+ *
+ * The backend places the browser in the *window's* coordinates, and on a Mac
+ * the page starts below the title bar — so it needs to know how tall the page
+ * is to work out the difference. Sending it with every rectangle keeps that a
+ * measurement rather than an assumption about window furniture.
+ */
+function placement(rect: Rect) {
+  return { ...rect, viewportH: window.innerHeight };
 }
 
 /** One article read off the page. */
@@ -40,12 +52,12 @@ export interface Capture {
 
 /** Opens the browser at `url`, covering `rect`. */
 export function savedOpen(url: string, rect: Rect): Promise<void> {
-  return invoke<void>("saved_open", { url, ...rect });
+  return invoke<void>("saved_open", { url, ...placement(rect) });
 }
 
 /** Keeps the browser glued to the modal's body as the window changes shape. */
 export function savedBounds(rect: Rect): Promise<void> {
-  return invoke<void>("saved_bounds", { ...rect });
+  return invoke<void>("saved_bounds", placement(rect));
 }
 
 export function savedBack(): Promise<void> {

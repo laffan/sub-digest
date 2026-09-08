@@ -332,31 +332,93 @@ mod desktop {
 })();
 "#;
 
-    pub fn open(app: &AppHandle, url: url::Url, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    /// How far the page's top sits below the window's own top.
+    ///
+    /// The rectangle the modal reports comes from `getBoundingClientRect`, which
+    /// is measured in the page. A child webview is placed in the window's
+    /// coordinates. On a Mac those differ: the window's content view runs the
+    /// full height of the window and the page begins below the title bar, so a
+    /// rectangle taken from the page lands that much too high and the browser is
+    /// drawn over the modal's own header.
+    ///
+    /// Rather than assume a title bar's height — or assume there is one — the
+    /// difference is measured: the window says how tall its client area is, the
+    /// page says how tall its viewport is, and the gap between them is the
+    /// answer. It comes out zero where the two spaces already agree, which is
+    /// most platforms, so this corrects only where a correction is due.
+    fn viewport_offset(app: &AppHandle, viewport_h: f64) -> (f64, String) {
+        if viewport_h <= 0.0 {
+            return (0.0, "the page didn't say how tall it is".into());
+        }
+        let Some(window) = app.get_window("main") else {
+            return (0.0, "no window to measure against".into());
+        };
+        let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+            return (0.0, "the window wouldn't say how big it is".into());
+        };
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let client_h = size.height as f64 / scale;
+        let offset = client_h - viewport_h;
+        // A window's furniture, not a mistake. Anything outside this is
+        // something else going on, and shifting the browser by it would be
+        // worse than leaving it where the page asked for.
+        let kept = if (1.0..=120.0).contains(&offset) { offset } else { 0.0 };
+        (
+            kept,
+            format!(
+                "page {viewport_h:.0} tall in a {client_h:.0} client area → offset {kept:.0}                 {}",
+                if kept == 0.0 && offset != 0.0 {
+                    format!(" ({offset:.0} ignored as implausible)")
+                } else {
+                    String::new()
+                }
+            ),
+        )
+    }
+
+    pub fn open(
+        app: &AppHandle,
+        url: url::Url,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        viewport_h: f64,
+    ) -> Result<(), String> {
         close(app);
         let window = app
             .get_window("main")
             .ok_or("the main window has gone missing")?;
+        let (dy, how) = viewport_offset(app, viewport_h);
+        log::info(
+            app,
+            "saved",
+            format!(
+                "Browser at {x:.0}, {:.0} ({w:.0}×{h:.0}) — {how}",
+                y + dy
+            ),
+        );
         let builder = tauri::webview::WebviewBuilder::new(LABEL, tauri::WebviewUrl::External(url))
             .initialization_script(NEUTER_POPUPS);
         window
             .add_child(
                 builder,
-                LogicalPosition::new(x, y),
+                LogicalPosition::new(x, y + dy),
                 LogicalSize::new(w.max(50.0), h.max(50.0)),
             )
             .map_err(|e| format!("could not open the browser: {e}"))?;
         Ok(())
     }
 
-    pub fn set_bounds(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) {
+    pub fn set_bounds(app: &AppHandle, x: f64, y: f64, w: f64, h: f64, viewport_h: f64) {
         if let Some(webview) = app.get_webview(LABEL) {
+            let (dy, _) = viewport_offset(app, viewport_h);
             // One `set_bounds` rather than a position then a size: each of those
             // is a round trip that reads the current rectangle back and rewrites
             // it, so sending them separately puts the webview somewhere neither
             // call meant for as long as it takes the second to arrive.
             let _ = webview.set_bounds(tauri::Rect {
-                position: LogicalPosition::new(x, y).into(),
+                position: LogicalPosition::new(x, y + dy).into(),
                 size: LogicalSize::new(w.max(50.0), h.max(50.0)).into(),
             });
         }
@@ -432,11 +494,22 @@ mod mobile {
         app.state::<SavedBrowser<tauri::Wry>>()
     }
 
-    pub fn open(app: &AppHandle, url: url::Url, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    // The Swift side measures its own offset — it places the browser relative to
+    // `hostWebView.frame.origin`, which is the same correction the desktop half
+    // works out from the two heights — so the viewport is nothing to it here.
+    pub fn open(
+        app: &AppHandle,
+        url: url::Url,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        _viewport_h: f64,
+    ) -> Result<(), String> {
         plugin(app).open(OpenArgs { url: url.to_string(), x, y, w, h })
     }
 
-    pub fn set_bounds(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) {
+    pub fn set_bounds(app: &AppHandle, x: f64, y: f64, w: f64, h: f64, _viewport_h: f64) {
         let _ = plugin(app).set_bounds(BoundsArgs { x, y, w, h });
     }
 
@@ -469,6 +542,7 @@ use mobile as browser;
 
 /// Opens the in-app browser at `url`, covering the rectangle the modal reports.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn saved_open(
     app: AppHandle,
     url: String,
@@ -476,16 +550,26 @@ pub async fn saved_open(
     y: f64,
     w: f64,
     h: f64,
+    // The page's own viewport height, which is what the rectangle was measured
+    // in. See `viewport_offset`.
+    viewport_h: f64,
 ) -> Result<(), String> {
     let target = checked_url(&url)?;
     log::info(&app, "saved", format!("Opening {target}"));
-    browser::open(&app, target, x, y, w, h)
+    browser::open(&app, target, x, y, w, h, viewport_h)
 }
 
 /// Keeps the browser glued to the modal's body as the window changes shape.
 #[tauri::command]
-pub async fn saved_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
-    browser::set_bounds(&app, x, y, w, h);
+pub async fn saved_bounds(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    viewport_h: f64,
+) -> Result<(), String> {
+    browser::set_bounds(&app, x, y, w, h, viewport_h);
     Ok(())
 }
 
