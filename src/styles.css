@@ -1189,17 +1189,38 @@ label.check {
   display: flex;
   flex-direction: column;
   padding: 0;
+  /* The bar is a stated size rather than a computed one; see below. */
+  --browser-head-h: 52px;
 }
 
-/* Head and foot hold their size; the body is what gives. Without this the
-   flex layout shrinks the header on a short window and clips its buttons. */
+/* The header's height is given, not derived.
+   It used to be one element doing two jobs — a flex item in the modal's column
+   and a flex container laying the controls out across it — so its height came
+   from resolving `flex-basis: auto` against its own contents. WebKit collapsed
+   that to nearly nothing and the modal's `overflow: hidden` took the buttons
+   with it. Now the outer element states the height and the inner one arranges
+   what's in it, and neither depends on the other. */
 .browser-head {
-  flex: none;
+  flex: 0 0 var(--browser-head-h);
+  height: var(--browser-head-h);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* A touch device's buttons are 44px, and the bar is a stated height, so it has
+   to be told. This sits after the declaration it overrides rather than up with
+   the other touch rules, which the base value would otherwise win back. */
+@media (pointer: coarse) {
+  .modal-browser {
+    --browser-head-h: 64px;
+  }
+}
+
+.browser-head-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  height: 100%;
 }
 
 .browser-title {
@@ -1217,6 +1238,8 @@ label.check {
   white-space: nowrap;
 }
 
+/* `flex: 1` is `1 1 0%`, so the body's height is the space left over rather
+   than anything resolved from its contents — it has none to speak of. */
 .browser-body {
   flex: 1;
   min-height: 0;
@@ -1229,8 +1252,11 @@ label.check {
   text-align: center;
 }
 
+/* The foot wraps to a second line when it has something to say, so this one is
+   sized by its text — but it can't be squeezed below a line of it. */
 .browser-foot {
-  flex: none;
+  flex: 0 0 auto;
+  min-height: 34px;
   margin: 0;
   padding: 8px 12px;
   border-top: 1px solid var(--border);

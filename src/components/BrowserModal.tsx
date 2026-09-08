@@ -98,28 +98,35 @@ export function BrowserModal({ url, capturing, notice, onCapture, onClose }: Pro
   return (
     <div className="modal-backdrop">
       <div className="modal modal-browser" role="dialog" aria-modal="true" aria-label={name}>
+        {/* The bar's height is the outer element's business and the layout of
+            the controls is the inner one's. Sharing one element made the header
+            both a flex item in the column and a flex container across it, and
+            its height fell out of resolving `flex-basis: auto` against its own
+            contents — which WebKit collapsed, taking the buttons with it. */}
         <div className="browser-head">
-          <span className="browser-title" title={url}>
-            {name}
-          </span>
-          <button
-            className="secondary"
-            onClick={() => void savedBack().catch(() => {})}
-            disabled={!opened || capturing}
-          >
-            ← Back
-          </button>
-          <button
-            className="primary"
-            onClick={onCapture}
-            disabled={!opened || capturing}
-            title="Take the articles listed on the page you're looking at"
-          >
-            {capturing ? "Reading…" : "Use this page"}
-          </button>
-          <button className="icon-btn" onClick={close} aria-label="Close the browser">
-            ✕
-          </button>
+          <div className="browser-head-row">
+            <span className="browser-title" title={url}>
+              {name}
+            </span>
+            <button
+              className="secondary"
+              onClick={() => void savedBack().catch(() => {})}
+              disabled={!opened || capturing}
+            >
+              ← Back
+            </button>
+            <button
+              className="primary"
+              onClick={onCapture}
+              disabled={!opened || capturing}
+              title="Take the articles listed on the page you're looking at"
+            >
+              {capturing ? "Reading…" : "Use this page"}
+            </button>
+            <button className="icon-btn" onClick={close} aria-label="Close the browser">
+              ✕
+            </button>
+          </div>
         </div>
 
         <div className="browser-body" ref={bodyRef}>
