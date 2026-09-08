@@ -28,15 +28,8 @@ import {
   loadFilters,
 } from "./filters";
 import { blockSignature, rememberedKeys, withSignatures } from "./remember";
-import {
-  SOURCES_KEY,
-  loadSources,
-  newSourceId,
-  openingUrl,
-  sourceLabel,
-  type SavedSource,
-} from "./sources";
-import { savedCapture, savedFetch, savedForget, savedHasSession } from "./saved";
+import { SITES_KEY, loadSites, rememberSite, type SavedSite } from "./sites";
+import { savedCapture, savedFetch, savedForget, savedSites } from "./saved";
 import { orderPosts, type PostOrder } from "./order";
 import { COVER_RESULTS, artworkLabel, metSearch } from "./met";
 import { markdownToBlocks } from "./parse";
@@ -114,13 +107,16 @@ export default function App() {
   const [account, setAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
 
-  // The saved-list input: the sites it knows about, which one is picked, and
-  // whether its browser is open. Sessions live in the backend — the most this
-  // side ever sees is the domain one is kept for.
-  const [sources, setSources] = useState<SavedSource[]>(loadSources);
-  const [sourceId, setSourceId] = useState("");
-  const [session, setSession] = useState<string | null>(null);
-  const [browserOpen, setBrowserOpen] = useState(false);
+  // The saved-list input: the sites signed in to, which one is picked, and what
+  // the browser is showing. Sessions live in the backend, under these same
+  // domains — this side holds a record of where it's been, nothing more.
+  const [sites, setSites] = useState<SavedSite[]>(loadSites);
+  const [domain, setDomain] = useState("");
+  // What the browser opens at: a known site's last page, or an address just
+  // typed in. Null when it's shut.
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  /** How many of a page's articles to take, newest first; 0 means all. */
+  const [cap, setCap] = useState(20);
   const [capturing, setCapturing] = useState(false);
   // Said inside the browser rather than behind it: a capture that found nothing
   // leaves the modal open, because the fix is to navigate and try again.
@@ -235,8 +231,8 @@ export default function App() {
   }, [filters]);
 
   useEffect(() => {
-    localStorage.setItem(SOURCES_KEY, JSON.stringify(sources));
-  }, [sources]);
+    localStorage.setItem(SITES_KEY, JSON.stringify(sites));
+  }, [sites]);
 
   useEffect(() => {
     localStorage.setItem(INPUT_KEY, input);
@@ -280,30 +276,31 @@ export default function App() {
     localStorage.setItem(ANTHROPIC_KEY, key);
   }, []);
 
-  // The site on screen: what's picked, or the first there is. A site removed
-  // leaves the picker on something real rather than on nothing.
-  const source = useMemo(
-    () => sources.find((s) => s.id === sourceId) ?? sources[0],
-    [sources, sourceId]
+  // The site on screen: what's picked, or the most recently used.
+  const site = useMemo(
+    () => sites.find((s) => s.domain === domain) ?? sites[0],
+    [sites, domain]
   );
 
-  // Whether the picked site has a session kept for it. It's stored on the
-  // device, so it survives a restart the way the Gmail token does — and it's
-  // only ever used to fetch that site's own articles.
+  // The backend holds the sessions, so it decides which sites are real. A site
+  // whose session has gone — app data cleared, forgotten on another run —
+  // shouldn't sit in the picker pretending you're still signed in.
   useEffect(() => {
-    const id = source?.id;
-    if (!id) {
-      setSession(null);
-      return;
-    }
     let live = true;
-    savedHasSession(id)
-      .then((domain) => live && setSession(domain))
-      .catch(() => live && setSession(null));
+    savedSites()
+      .then((known) => {
+        if (!live) return;
+        const real = new Set(known);
+        setSites((list) => {
+          const kept = list.filter((s) => real.has(s.domain));
+          return kept.length === list.length ? list : kept;
+        });
+      })
+      .catch(() => {});
     return () => {
       live = false;
     };
-  }, [source?.id]);
+  }, []);
 
   /**
    * Switches inputs. What's on screen came from the other one, and a session
@@ -394,60 +391,47 @@ export default function App() {
     }
   }, [scanWindow, scanFilters, fail]);
 
-  const addSource = useCallback((name: string, url: string) => {
-    const added: SavedSource = { id: newSourceId(), name, url };
-    setSources((list) => [...list, added]);
-    setSourceId(added.id);
+  /** Opens the browser at an address — a known site's, or a newly typed one. */
+  const openBrowser = useCallback((url: string) => {
+    setError(null);
+    setCaptureNotice(null);
+    setBrowserUrl(url);
   }, []);
 
-  const removeSource = useCallback(
-    (id: string) => {
-      savedForget(id).catch(() => {});
-      setSources((list) => list.filter((s) => s.id !== id));
-      setSourceId("");
-      setCaptured(null);
-      setPosts([]);
-    },
-    []
-  );
-
-  const forgetSession = useCallback(() => {
-    if (!source) return;
-    savedForget(source.id).catch(() => {});
-    setSession(null);
-    logInfo("saved", `Forgot the session kept for ${sourceLabel(source)}`);
-  }, [source]);
+  const forgetSite = useCallback((gone: string) => {
+    savedForget(gone).catch(() => {});
+    setSites((list) => list.filter((s) => s.domain !== gone));
+    setDomain("");
+    setCaptured(null);
+    setPosts([]);
+    logInfo("saved", `Forgot ${gone} and the session kept for it`);
+  }, []);
 
   /**
    * **Use this page**: reads the list the browser is showing, and turns it into
    * posts. They arrive in the same shape a scanned email does, which is the
    * whole point — everything after this step is the work it always was.
    *
-   * The page is also remembered as where this site opens next time, since a
-   * saved list is somewhere you go back to.
+   * Which site this was is whatever the browser ended up on, so the capture is
+   * also how a site gets into the picker: signing in and navigating *are* the
+   * choosing.
    */
   const captureList = useCallback(async () => {
-    if (!source) return;
     setError(null);
     setCaptureNotice(null);
     setCapturing(true);
     try {
-      const capture = await savedCapture(source.id);
-      const within = scanWindow;
-      // The page dated what it dated. An article it didn't date can't be held
-      // to a timeframe, so it's kept and dated today — an entry has to carry a
-      // date, and the day it was collected is the honest answer to when it
-      // reached you. The log says how many, since that's a stand-in for a fact.
+      const capture = await savedCapture();
+      // The page's own order is the only claim about recency worth trusting:
+      // most sites don't date the rows on a saved page at all. So the cap comes
+      // off the top of the page, before anything is sorted.
+      const taken = cap > 0 ? capture.items.slice(0, cap) : capture.items;
+      // An entry has to carry a date — the byline under its title says when, and
+      // so does the span on the cover — so an undated article is dated the day
+      // it was collected. The log says how many, since that's a stand-in.
       const collectedAt = Date.now();
-      const inWindow = capture.items.filter(
-        (item) =>
-          item.dateMs <= 0 ||
-          !within ||
-          ((within.after <= 0 || item.dateMs >= within.after) &&
-            (within.before <= 0 || item.dateMs < within.before))
-      );
-      const undated = inWindow.filter((item) => item.dateMs <= 0).length;
-      const found: Post[] = inWindow
+      const undated = taken.filter((item) => item.dateMs <= 0).length;
+      const found: Post[] = taken
         .map((item) => ({
           id: item.id,
           // Nothing reads this for a saved article — the byline and the
@@ -460,7 +444,6 @@ export default function App() {
           publication: item.publication,
           selected: true,
           source: "saved" as const,
-          sourceId: source.id,
           url: item.url,
           author: item.author || undefined,
         }))
@@ -468,14 +451,12 @@ export default function App() {
 
       setPosts(found);
       setCaptured({ count: found.length, from: capture.pageUrl });
-      setSources((list) =>
-        list.map((s) => (s.id === source.id ? { ...s, lastUrl: capture.pageUrl } : s))
-      );
-      setSession(await savedHasSession(source.id).catch(() => null));
+      setSites((list) => rememberSite(list, capture.domain, capture.pageUrl));
+      setDomain(capture.domain);
       // Nothing found leaves the browser open: the page shown was a sign-in
       // screen or the wrong page, and both are fixed by navigating, not by
       // starting over.
-      if (found.length > 0) setBrowserOpen(false);
+      if (found.length > 0) setBrowserUrl(null);
 
       const pubs = new Set(found.map((p) => p.publication));
       logInfo(
@@ -483,9 +464,12 @@ export default function App() {
         `Took ${found.length} article${found.length === 1 ? "" : "s"} from ${pubs.size} ` +
           `publication${pubs.size === 1 ? "" : "s"} off ${capture.pageUrl}`
       );
-      const skipped = capture.items.length - inWindow.length;
-      if (skipped > 0) {
-        logInfo("saved", `${skipped} article(s) on the page fell outside the timeframe`);
+      if (capture.items.length > taken.length) {
+        logInfo(
+          "saved",
+          `${capture.items.length - taken.length} further article(s) on the page were left, ` +
+            `past the ${cap} asked for`
+        );
       }
       if (undated > 0) {
         logWarn(
@@ -497,9 +481,7 @@ export default function App() {
       }
       if (found.length === 0) {
         setCaptureNotice(
-          capture.items.length > 0
-            ? "Everything on that page fell outside the timeframe."
-            : "Nothing on that page looked like an article — go to the list itself and try again."
+          "Nothing on that page looked like an article — go to the list itself and try again."
         );
       }
     } catch (e) {
@@ -508,7 +490,7 @@ export default function App() {
     } finally {
       setCapturing(false);
     }
-  }, [source, scanWindow, fail]);
+  }, [cap, fail]);
 
   const toggleFilter = useCallback((id: string, enabled: boolean) => {
     setFilters((fs) => fs.map((f) => (f.id === id ? { ...f, enabled } : f)));
@@ -571,7 +553,7 @@ export default function App() {
       if (!p.url) return [];
       let markdown = bodyCache.current.get(p.id);
       if (markdown === undefined) {
-        markdown = await savedFetch(p.sourceId ?? "", p.url);
+        markdown = await savedFetch(p.url);
         bodyCache.current.set(p.id, markdown);
       }
       const blocks = markdownToBlocks(markdown, p.subject);
@@ -1022,20 +1004,14 @@ export default function App() {
                 </>
               ) : (
                 <SavedPanel
-                  sources={sources}
-                  sourceId={source?.id ?? ""}
-                  onSourceChange={setSourceId}
-                  onAddSource={addSource}
-                  onRemoveSource={removeSource}
-                  session={session}
-                  onForgetSession={forgetSession}
-                  onOpenBrowser={() => setBrowserOpen(true)}
+                  sites={sites}
+                  domain={site?.domain ?? ""}
+                  onDomainChange={setDomain}
+                  onOpen={openBrowser}
+                  onForget={forgetSite}
+                  cap={cap}
+                  onCapChange={setCap}
                   captured={captured}
-                  days={days}
-                  range={range}
-                  rangeValid={scanWindow !== null}
-                  onDaysChange={setDays}
-                  onRangeChange={setRange}
                 />
               )}
 
@@ -1043,7 +1019,12 @@ export default function App() {
                 posts={posts}
                 agentPosts={agentPosts}
                 processed={processedBefore}
-                limit={input === "gmail" ? SCAN_LIMIT : CAPTURE_LIMIT}
+                limit={input === "gmail" ? SCAN_LIMIT : cap || CAPTURE_LIMIT}
+                limitNote={
+                  input === "gmail"
+                    ? `Showing the first ${SCAN_LIMIT.toLocaleString()} — narrow the timeframe to reach older ones.`
+                    : "That's as many as Take asked for — raise it, or scroll further back before capturing."
+                }
                 onTogglePost={togglePost}
                 onSetPostsSelected={setPostsSelected}
                 onTogglePublication={togglePublication}
@@ -1203,14 +1184,13 @@ export default function App() {
 
       {showLog && <LogPane onClose={() => setShowLog(false)} />}
 
-      {browserOpen && source && (
+      {browserUrl && (
         <BrowserModal
-          url={openingUrl(source)}
-          name={sourceLabel(source)}
+          url={browserUrl}
           capturing={capturing}
           notice={captureNotice}
           onCapture={captureList}
-          onClose={() => setBrowserOpen(false)}
+          onClose={() => setBrowserUrl(null)}
         />
       )}
 

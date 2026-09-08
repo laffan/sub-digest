@@ -37,12 +37,6 @@ export interface Post extends PostMeta {
   source: InputKind;
   /** The article's own address; saved-list items only. */
   url?: string;
-  /**
-   * The source it was collected from, so fetching it later uses that site's
-   * session rather than whichever source the picker happens to be showing by
-   * then. Saved-list items only.
-   */
-  sourceId?: string;
   /** Who the list said wrote it, when it said. */
   author?: string;
 }

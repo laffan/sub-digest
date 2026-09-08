@@ -4,8 +4,6 @@ import { savedBack, savedBounds, savedClose, savedOpen } from "../saved";
 interface Props {
   /** Where the browser opens. */
   url: string;
-  /** What the site is called, for the modal's title. */
-  name: string;
   /** True while the page is being read, which is not instant on a long list. */
   capturing: boolean;
   /** What the last attempt to read the page had to say, if it didn't take. */
@@ -28,7 +26,16 @@ interface Props {
  * asks for happens in a real browser, and the app waits until you say the page
  * in front of you is the one you meant.
  */
-export function BrowserModal({ url, name, capturing, notice, onCapture, onClose }: Props) {
+export function BrowserModal({ url, capturing, notice, onCapture, onClose }: Props) {
+  // The site it opened at. Where the user navigates from there is theirs to
+  // see in the page itself; this is a label, not an address bar.
+  const name = (() => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      return url;
+    }
+  })();
   const bodyRef = useRef<HTMLDivElement>(null);
   const [opened, setOpened] = useState(false);
   const [error, setError] = useState<string | null>(null);

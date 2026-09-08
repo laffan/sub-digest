@@ -112,18 +112,19 @@ const HARVEST_JS: &str = r##"
 // ---------------------------------------------------------------------------
 // Stored sessions
 
-/// What a capture left behind: the site's cookie, and the domain it belongs to.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct Session {
-    /// Cookies are sent to this domain and its subdomains, and nowhere else.
-    domain: String,
-    /// A ready-made `Cookie:` header. Never logged.
-    cookie: String,
-}
+/// The sites captured from, by domain, each with the `Cookie:` header its
+/// capture left behind. The domain is the key because the site is what you
+/// signed in to: a capture made on `substack.com` is the session that reads a
+/// post on `acx.substack.com`, and nothing else needs to know which button was
+/// pressed to get it. A site with no cookies is still an entry — a public list
+/// needs no session, and it should still be a site you can go back to.
+///
+/// Values are never logged.
+type Sites = HashMap<String, String>;
 
-/// Every site with a live session, by source id. Loaded from disk on first use.
+/// Loaded from disk on first use.
 #[derive(Default)]
-pub struct SavedState(Mutex<Option<HashMap<String, Session>>>);
+pub struct SavedState(Mutex<Option<Sites>>);
 
 fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -134,24 +135,24 @@ fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("saved-sessions.json"))
 }
 
-fn sessions(app: &AppHandle, state: &SavedState) -> HashMap<String, Session> {
+fn sites(app: &AppHandle, state: &SavedState) -> Sites {
     let mut guard = state.0.lock().unwrap();
     if guard.is_none() {
         let loaded = store_path(app)
             .ok()
             .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| serde_json::from_slice::<HashMap<String, Session>>(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<Sites>(&bytes).ok())
             .unwrap_or_default();
         *guard = Some(loaded);
     }
     guard.clone().unwrap_or_default()
 }
 
-fn put_session(app: &AppHandle, state: &SavedState, id: &str, session: Option<Session>) {
-    let mut all = sessions(app, state);
-    match session {
-        Some(s) => all.insert(id.to_string(), s),
-        None => all.remove(id),
+fn put_site(app: &AppHandle, state: &SavedState, domain: &str, cookie: Option<String>) {
+    let mut all = sites(app, state);
+    match cookie {
+        Some(c) => all.insert(domain.to_string(), c),
+        None => all.remove(domain),
     };
     if let Ok(path) = store_path(app) {
         if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
@@ -161,7 +162,7 @@ fn put_session(app: &AppHandle, state: &SavedState, id: &str, session: Option<Se
     *state.0.lock().unwrap() = Some(all);
 }
 
-/// Whether a host is the source's domain, or under it.
+/// Whether a host is the site's domain, or under it.
 fn host_matches(host: &str, domain: &str) -> bool {
     let host = host.trim_start_matches('.').to_ascii_lowercase();
     let domain = domain.trim_start_matches('.').to_ascii_lowercase();
@@ -201,6 +202,9 @@ pub struct SavedItem {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capture {
+    /// The site it came from — the domain the session is kept under, and the
+    /// name the site goes by in the picker from here on.
+    pub domain: String,
     /// The address the list was read from, for the line that says where.
     pub page_url: String,
     pub page_title: String,
@@ -264,7 +268,7 @@ fn parse_harvest(raw: &str) -> Result<RawPage, String> {
 }
 
 /// Turns the script's answer into the articles the digest will be built from.
-fn capture_from(page: RawPage) -> Capture {
+fn capture_from(page: RawPage, domain: String) -> Capture {
     let mut items = Vec::new();
     for raw in page.items.into_iter().take(MAX_ITEMS) {
         let Ok(url) = url::Url::parse(&raw.url) else {
@@ -283,6 +287,7 @@ fn capture_from(page: RawPage) -> Capture {
         });
     }
     Capture {
+        domain,
         page_url: page.url,
         page_title: page.title,
         items,
@@ -490,28 +495,34 @@ pub async fn saved_close(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// **Use this page**: reads the list in front of the user, and keeps the
-/// session that made it readable.
+/// **Use this page**: reads the list in front of the user, and keeps the site —
+/// and the session that made it readable — for next time.
 #[tauri::command]
 pub async fn saved_capture(
     app: AppHandle,
     state: State<'_, SavedState>,
-    source_id: String,
+    // No site is named by the caller: which site this is, is whichever one the
+    // browser ended up on. Signing in and navigating are the same act as
+    // choosing, so there is nothing to pick beforehand.
 ) -> Result<Capture, String> {
     let (page, page_url, cookie) = browser::capture(&app).await?;
     let domain = session_domain(&page_url);
+    if domain.is_empty() {
+        return Err("that page isn't on a site the app can keep".to_string());
+    }
 
     if cookie.is_empty() {
-        log::warn(
-            &app,
-            "saved",
-            format!("{domain} handed back no cookies — a subscriber-only article may not read"),
-        );
-        // A session already kept for this source is better than none: the user
-        // may have signed in on an earlier capture and only navigated this time.
-        if !sessions(&app, &state).contains_key(&source_id) {
-            put_session(&app, &state, &source_id, Some(Session { domain: domain.clone(), cookie }));
+        // A public list needs no session, and a site already signed in to
+        // shouldn't lose one because this capture happened to hand back nothing.
+        let known = sites(&app, &state).get(&domain).cloned();
+        if known.as_deref().unwrap_or("").is_empty() {
+            log::warn(
+                &app,
+                "saved",
+                format!("{domain} handed back no cookies — a subscriber-only article may not read"),
+            );
         }
+        put_site(&app, &state, &domain, Some(known.unwrap_or_default()));
     } else {
         let names: Vec<&str> = cookie
             .split(';')
@@ -523,10 +534,10 @@ pub async fn saved_capture(
             "saved",
             format!("Kept the session for {domain} ({})", names.join(", ")),
         );
-        put_session(&app, &state, &source_id, Some(Session { domain, cookie }));
+        put_site(&app, &state, &domain, Some(cookie));
     }
 
-    let capture = capture_from(page);
+    let capture = capture_from(page, domain);
     log::info(
         &app,
         "saved",
@@ -540,40 +551,40 @@ pub async fn saved_capture(
     Ok(capture)
 }
 
-/// Forgets a site's session. The browser's own cookies are not touched — the
-/// next capture signs in again the way the site expects.
+/// The sites captured from, so the picker offers what you've actually signed in
+/// to rather than a list of addresses you once typed.
 #[tauri::command]
-pub fn saved_forget(app: AppHandle, state: State<'_, SavedState>, source_id: String) {
-    put_session(&app, &state, &source_id, None);
+pub fn saved_sites(app: AppHandle, state: State<'_, SavedState>) -> Vec<String> {
+    let mut domains: Vec<String> = sites(&app, &state).into_keys().collect();
+    domains.sort();
+    domains
 }
 
-/// Whether a site has a session kept for it, for the line that says so.
+/// Forgets a site and its session. The browser's own cookies are not touched —
+/// opening it again signs in the way the site expects.
 #[tauri::command]
-pub fn saved_has_session(
-    app: AppHandle,
-    state: State<'_, SavedState>,
-    source_id: String,
-) -> Option<String> {
-    sessions(&app, &state).get(&source_id).map(|s| s.domain.clone())
+pub fn saved_forget(app: AppHandle, state: State<'_, SavedState>, domain: String) {
+    put_site(&app, &state, &domain, None);
 }
 
 /// Fetches one saved article as Markdown — the same scrape the AI agent's link
-/// roundups go through. The session rides along when the article is on the
-/// source's own domain, which is what gets a subscriber-only post back as the
-/// text you're entitled to rather than a paywall notice.
+/// roundups go through. The session rides along when the article is on a site
+/// that has one, which is what gets a subscriber-only post back as the text
+/// you're entitled to rather than a paywall notice.
 #[tauri::command]
 pub async fn saved_fetch(
     app: AppHandle,
     state: State<'_, SavedState>,
-    source_id: String,
     url: String,
 ) -> Result<String, String> {
     let target = checked_url(&url)?;
     let host = target.host_str().unwrap_or("");
-    let cookie = sessions(&app, &state)
-        .get(&source_id)
-        .filter(|s| host_matches(host, &s.domain) && !s.cookie.is_empty())
-        .map(|s| s.cookie.clone());
+    // Whichever signed-in site covers this host, if any. An article on a site
+    // you never signed in to is fetched as anyone would fetch it.
+    let cookie = sites(&app, &state)
+        .into_iter()
+        .find(|(domain, cookie)| !cookie.is_empty() && host_matches(host, domain))
+        .map(|(_, cookie)| cookie);
     let article = anthropic::fetch_article(&app, target.as_str(), None, cookie.as_deref()).await?;
     Ok(article.markdown)
 }
@@ -645,7 +656,7 @@ mod tests {
                 RawItem { url: "not a url".into(), ..Default::default() },
             ],
         };
-        let capture = capture_from(page);
+        let capture = capture_from(page, "substack.com".to_string());
         assert_eq!(capture.items.len(), 1);
         let item = &capture.items[0];
         assert_eq!(item.id, "saved:https://acx.substack.com/p/onions");

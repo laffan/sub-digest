@@ -75,14 +75,15 @@ pressed **Save** on in Substack, say.
    publication's name is enough to find it. It keeps finding what it found,
    and reading it how it read it.
 4. **Collect a saved list** — the other way in, and a browser rather than an
-   API. **Open Substack…** puts the site in a modal; you sign in there the way
-   you always do, go to your saved posts, and press **Use this page**. The links
-   on the page you're looking at become the articles, fetched from the site and
-   scraped into entries — the same scrape the AI agent's link roundups get, so a
-   saved post and a linked one arrive in the digest as the same kind of thing.
-   Nothing about it is Substack-specific: **Add site** takes a name and an
-   address, and anything with a page of links behind a login works. See [The
-   Saved List input](#the-saved-list-input).
+   API. Give it the address of your saved page the first time; it opens in a
+   modal, you sign in there the way you always do, and you press **Use this
+   page**. The links on the page you're looking at become the articles, fetched
+   from the site and scraped into entries — the same scrape the AI agent's link
+   roundups get, so a saved post and a linked one arrive in the digest as the
+   same kind of thing. The site is in the picker from then on, and **Take** caps
+   how many of the page's articles come back. Nothing about it is
+   Substack-specific: anything with a page of links behind a login works. See
+   [The Saved List input](#the-saved-list-input).
 5. **Select** — check/uncheck whole publications or individual posts, or
    **shift-click** a post to select (or deselect) everything between it and
    your last click, across publications. Posts already fetched and parsed in an
@@ -221,21 +222,32 @@ other site with a *save*, a *read later* or a *bookmarks* page.
 So the app doesn't try to know anything about the site. It opens a browser of
 its own in a modal, and you use it:
 
-1. Pick the site and press **Open Substack…**.
+1. The first time, type the page your list is on —
+   `https://substack.com/saved` — and press **Open and sign in**.
 2. Sign in the way you always sign in — password manager, two-factor, single
    sign-on, a captcha. It's a real browser, so whatever the site asks for works.
-3. Go to the list you want. Scroll to the bottom if it loads as you go.
+3. Go to the list you want. Scroll far enough back if it loads as you go.
 4. Press **Use this page**.
 
 What that reads is the page in front of you, as rendered. The links on it become
 the articles the digest is built from, and they land in the same list a mail scan
 fills, to be picked over the same way. The modal closes and the run carries on.
 
+The **site** picker is what you've signed in to, not a set of bookmarks. There
+is no list of addresses to keep: a capture is what puts a site there, under its
+own domain, and it reopens at the page it was last read from. **Another site**
+takes you back to the address field for the next one, and **Forget …** drops a
+site and its session together.
+
 Nothing about that is Substack-specific, and there's no recipe to get wrong: a
 site that redesigns its saved page, or renames the endpoint behind it, changes
-nothing here. **Add site** takes a name and an address, so anything with a page
-of links behind a login works — the page decides what's on it, and you decide
-when it's the right page. Each site reopens where you left it.
+nothing here.
+
+**Take** caps how many articles one capture brings back — 10, 20, 30, 50, 100,
+or everything on the page. It comes off the top, in the page's own order: a
+saved list is kept newest-first by the site, and that's the only claim about
+recency worth trusting, since most sites don't date the rows on a saved page at
+all. (There's no "last 30 days" here for the same reason.)
 
 ### What counts as an article
 
@@ -247,9 +259,9 @@ longest text wins, since a card usually links to the same post twice.
 Then the app looks at the card the link sits in — climbing until the thing above
 stops being a single item — for a `<time>` to date it by and a byline. Whatever
 it doesn't find, it does without: the publication falls back to the site the
-article is on, and an undated article is dated the day you collected it (the log
-says how many). Articles the page dated are held to the timeframe; undated ones
-are always kept.
+article is on, and an undated article is dated the day you collected it, since
+an entry has to carry a date for its byline and the digest's own span (the log
+says how many).
 
 It is deliberately generous, because you get to prune. Everything it found
 arrives in the post list with a checkbox on it.
@@ -258,11 +270,12 @@ arrives in the post list with a checkbox on it.
 
 A capture also keeps the site's session cookie, because a saved post is often
 subscriber-only and fetching it later needs the session that made it readable in
-the browser. It's stored in the app's data directory beside the Gmail token,
-written to the log by name only, and sent to that site's domain and its
-subdomains alone — a redirect off that host drops it. **Forget the … session**
-discards it; the browser's own cookies are left alone, so the next capture is
-still signed in.
+the browser. It's kept under the site's own domain — `substack.com`, so a
+capture made there reads a post on `acx.substack.com` — in the app's data
+directory beside the Gmail token, written to the log by name only, and sent to
+that domain and its subdomains alone; a redirect off that host drops it.
+**Forget …** discards it along with the site; the browser's own cookies are left
+alone, so opening it again may well still be signed in.
 
 The browser is a plain remote page with no access to the app: Tauri capabilities
 apply to local app URLs unless a capability names remote URLs explicitly, and
@@ -508,10 +521,11 @@ Two things worth knowing about what comes out:
 | iOS deep-link OAuth | `src-tauri/src/gmail.rs`, `src-tauri/src/lib.rs` | Custom-scheme redirect routed back via `tauri-plugin-deep-link`; public client, no secret |
 | Gmail API + token refresh | `src-tauri/src/gmail.rs` | Search, header metadata (8-way concurrent), body fetch, HTTPS image proxy; secret omitted for public clients |
 | Inputs | `src/App.tsx`, `src/components/InputPicker.tsx` | The first step is a choice of where the session's reading comes from, and the two inputs meet at one shape: a post with a title, a publication and a date, whether it came out of a mailbox or off a list. Only two places know the difference — the panel that collects, and the line in `organize` that decides whether a post is read by fetching an email or by scraping an address. Switching inputs clears what the other found rather than merging them: the steps after this one are about a selection, and a selection made of both would be one nobody could reason about |
-| Saved-list sources | `src/sources.ts`, `src/components/SavedPanel.tsx` | A source is a name and an address, and that's all of it. Nothing predicts what a site's list looks like, so there's nothing to be wrong about: the browser opens there, and what gets read is the page you were on when you pressed the button. Each site reopens where you left it |
+| Saved-list sites | `src/sites.ts`, `src/components/SavedPanel.tsx` | A site isn't configured, it's recorded: you type an address once, and the site a capture *landed on* is what goes in the picker, under its own domain. So the picker is where you've actually signed in rather than a set of bookmarks to maintain, and there's nothing to keep in step with a site that redesigns itself. The backend holds the sessions under the same domains and is the authority on which sites are real — the stored list is reconciled against it at startup, so one whose session has gone doesn't sit there pretending |
+| Taking the top of the page | `src/App.tsx` (`captureList`) | **Take** caps a capture off the top *in the page's own order*, before anything is sorted. A saved list is kept newest-first by the site, and that's the only claim about recency worth trusting: most sites don't date the rows on a saved page, so a date filter would be sorting on a value the app made up. Undated articles are dated the day they were collected, because an entry has to carry a date for its byline and the digest's span |
 | The in-app browser | `src-tauri/src/saved.rs`, `src/components/BrowserModal.tsx` | The modal is chrome; the page is a real webview the backend owns, overlaid on the rectangle the modal's body reports and moved with it by a `ResizeObserver`. Desktop uses a Tauri child webview (`Window::add_child`, the `unstable` multiwebview API); iPadOS a native `WKWebView` from `tauri-plugin-saved-browser`, since child webviews are desktop-only. An init script folds `window.open` and `target=_blank` back into the same webview, which a Tauri webview otherwise swallows. The page is remote, so no capability covers it and it can't call a command |
 | Reading the page | `src-tauri/src/saved.rs` (`HARVEST_JS`) | One script, defined once and handed to whichever platform runs it. A link is an article when it has words on it and isn't inside `nav`/`header`/`footer`/`aside`/`form`; the same href twice keeps the longer text, since a card links to its post from both the picture and the headline. A date and a byline are looked for in the card the link sits in, found by climbing until the thing above holds more than three links and so isn't one item any more. Everything it knows it knows from the rendered document — which is what makes a list that loads as you scroll, or renders in JavaScript, work at all |
-| The session it leaves | `src-tauri/src/saved.rs` | Kept because a saved post is often subscriber-only. It comes from the webview's own cookie store rather than the page, since a session cookie is `HttpOnly` and the script couldn't see it either, and it's stored as one `Cookie` header for the site's registrable domain — `substack.com`, so a capture made there reads a post on `acx.substack.com`. Sent to that domain and its subdomains alone, and dropped by reqwest on any redirect that crosses hosts. Unit-tested |
+| The session it leaves | `src-tauri/src/saved.rs` | Kept because a saved post is often subscriber-only. It comes from the webview's own cookie store rather than the page, since a session cookie is `HttpOnly` and the script couldn't see it either, and it's stored as one `Cookie` header keyed by the site's registrable domain — `substack.com`, so a capture made there reads a post on `acx.substack.com`. The domain being the key is what lets the rest of the app forget which button was pressed: fetching an article just asks which signed-in site covers its host. Sent to that domain and its subdomains alone, and dropped by reqwest on any redirect that crosses hosts. Unit-tested |
 | Saved articles → entries | `src-tauri/src/saved.rs`, `src-tauri/src/anthropic.rs` (`fetch_article`) | The same scrape the agent's link roundups get — body-copy detection, images, furniture dropped — so a saved post and a linked one are the same kind of thing by the time they reach the running order. One unfetchable article is logged and left out rather than failing the run |
 | Mail filters | `src/filters.ts`, `src/components/FilterEditorModal.tsx` | The saved filters — what to find, whether the agent reads it, and what it remembers taking out of it — their storage, and the migration from the sender-domain list and per-publication agent settings that came before. Values are normalized on the way in: a pasted `https://ghost.io/blog` becomes `ghost.io`, `Nate <news@example.com>` becomes the address, and a sender's *name* keeps its spaces and capitals, since Gmail matches those too and it's read back in the editor |
 | Filters → Gmail queries | `src-tauri/src/gmail.rs` | Domains, addresses and sender names are alternatives on one `from:` (no message is from two senders); subject slices become `subject:("…" OR "…")`, search terms bare phrases, and the kinds are ANDed. Each **enabled filter runs as its own query** rather than one big OR — a search term matches the body, so which filter caught a message can't be worked out from its headers afterwards, and every message has to come back knowing. Ids are unioned first and headers fetched once, so a message two filters found still costs one metadata request. Quotes are what delimits a phrase, so they're stripped from the text rather than escaped, and a `from:` operand that would need quoting is dropped instead — a filter can't break out of its own query. Unit-tested |
@@ -559,9 +573,10 @@ nothing is dropped and the files stay small too.
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | "Nothing on that page looked like an article" | The page shown was a sign-in screen, an empty list, or a page whose links are all too short to be headlines | Go to the list itself and press **Use this page** there. The log says how many links were read |
-| Only the first handful came back | The list loads as you scroll, and what's read is what the page is showing | Scroll to the bottom of the list before pressing the button |
+| Only the first handful came back | Either **Take** is set low, or the list loads as you scroll and what's read is what the page is showing | Raise **Take**, and scroll far enough back in the list before pressing the button |
 | Navigation and menu items came back as articles | The page puts its list outside the usual `nav`/`header`/`footer` elements | Uncheck them in the post list — the capture is deliberately generous because you prune it |
-| Articles arrive as a paywall notice | The article is on a different domain than the session covers, or the session expired | Open the site again and capture from a signed-in page; the session is kept per site |
+| Articles arrive as a paywall notice | The article is on a different domain than the session covers, or the session expired | Open the site again and capture from a signed-in page; the session is kept per site, under its own domain |
+| A site you signed in to isn't in the picker | Nothing was ever captured from it, or its session has been forgotten | Sites are recorded by a successful capture, not by typing an address — **Another site**, then sign in and **Use this page** |
 | "The in-app browser couldn't open" | On a desktop build without the `unstable` Tauri feature, or an iPad build without the Swift plugin compiled in | Rebuild — both are wired up in `Cargo.toml` |
 
 ## Privacy

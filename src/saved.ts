@@ -31,6 +31,8 @@ export interface SavedItem {
 
 /** What **Use this page** brought back. */
 export interface Capture {
+  /** The site it landed on — the session's key, and the site's name. */
+  domain: string;
   pageUrl: string;
   pageTitle: string;
   items: SavedItem[];
@@ -55,28 +57,29 @@ export function savedClose(): Promise<void> {
 }
 
 /**
- * Reads the page the browser is showing, and keeps the session that made it
- * readable. That session is what gets a subscriber-only article back later.
+ * Reads the page the browser is showing, and keeps the site — and the session
+ * that made it readable — for next time. Which site this is, is whichever one
+ * the browser ended up on: signing in and navigating *are* the choosing.
  */
-export function savedCapture(sourceId: string): Promise<Capture> {
-  return invoke<Capture>("saved_capture", { sourceId });
+export function savedCapture(): Promise<Capture> {
+  return invoke<Capture>("saved_capture");
 }
 
-/** Forgets a site's session; the browser's own cookies are left alone. */
-export function savedForget(sourceId: string): Promise<void> {
-  return invoke<void>("saved_forget", { sourceId });
+/** The sites captured from, as domains. The backend is the authority. */
+export function savedSites(): Promise<string[]> {
+  return invoke<string[]>("saved_sites");
 }
 
-/** The domain a site has a session kept for, or null. */
-export function savedHasSession(sourceId: string): Promise<string | null> {
-  return invoke<string | null>("saved_has_session", { sourceId });
+/** Forgets a site and its session; the browser's own cookies are left alone. */
+export function savedForget(domain: string): Promise<void> {
+  return invoke<void>("saved_forget", { domain });
 }
 
 /**
  * Fetches one saved article as Markdown — the same scrape the AI agent's link
- * roundups go through, with the site's session attached when the article is on
- * its own domain.
+ * roundups go through, with a signed-in site's session attached when the
+ * article is on it.
  */
-export function savedFetch(sourceId: string, url: string): Promise<string> {
-  return invoke<string>("saved_fetch", { sourceId, url });
+export function savedFetch(url: string): Promise<string> {
+  return invoke<string>("saved_fetch", { url });
 }

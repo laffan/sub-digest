@@ -1,63 +1,64 @@
 import { useState } from "react";
-import { domainFromUrl, sourceIsUsable, sourceLabel, type SavedSource } from "../sources";
-import { TimeframePicker } from "./TimeframePicker";
-import type { DateRange } from "../types";
+import { EXAMPLE_URL, isOpenable, normalizeUrl, siteDetail, type SavedSite } from "../sites";
 
 interface Props {
-  sources: SavedSource[];
-  sourceId: string;
-  onSourceChange: (id: string) => void;
-  onAddSource: (name: string, url: string) => void;
-  onRemoveSource: (id: string) => void;
-  /** The domain this site has a session kept for, or null. */
-  session: string | null;
-  onForgetSession: () => void;
-  onOpenBrowser: () => void;
+  /** Sites already signed in to, newest first. */
+  sites: SavedSite[];
+  /** The one picked, by domain. */
+  domain: string;
+  onDomainChange: (domain: string) => void;
+  /** Opens the browser at an address — a known site's, or a newly typed one. */
+  onOpen: (url: string) => void;
+  onForget: (domain: string) => void;
+  /** How many of the page's articles to take, newest first; 0 means all. */
+  cap: number;
+  onCapChange: (cap: number) => void;
   /** What the last capture said it read, for the line under the button. */
   captured: { count: number; from: string } | null;
-  days: number;
-  range: DateRange;
-  rangeValid: boolean;
-  onDaysChange: (days: number) => void;
-  onRangeChange: (range: DateRange) => void;
 }
 
 /**
- * The saved-list input: pick a site, open it, and bring back what's on the page
- * you land on.
+ * How many articles one capture takes, off the top of the page. A saved list is
+ * kept in the order the site keeps it — usually newest first — and that order is
+ * the only claim about recency worth trusting here: most sites don't date the
+ * rows on a saved page at all.
+ */
+const CAPS = [10, 20, 30, 50, 100, 0];
+
+function capLabel(cap: number): string {
+  return cap === 0 ? "Everything on the page" : `${cap} most recent`;
+}
+
+/**
+ * The saved-list input: open a site, and bring back what's on the page you land
+ * on.
  *
- * There is no sign-in here, which is the point — signing in happens in the
- * browser the button opens, the way it happens everywhere else. What this panel
- * holds is the short list of sites you go to and the timeframe the articles are
- * held to.
+ * There's no sign-in here and nothing to configure. The first time, you give it
+ * an address; you sign in inside the browser it opens, press **Use this page**,
+ * and the site is in the picker from then on. So the list below is a record of
+ * where you've actually been rather than a set of bookmarks to maintain.
  */
 export function SavedPanel({
-  sources,
-  sourceId,
-  onSourceChange,
-  onAddSource,
-  onRemoveSource,
-  session,
-  onForgetSession,
-  onOpenBrowser,
+  sites,
+  domain,
+  onDomainChange,
+  onOpen,
+  onForget,
+  cap,
+  onCapChange,
   captured,
-  days,
-  range,
-  rangeValid,
-  onDaysChange,
-  onRangeChange,
 }: Props) {
+  // With no sites yet there's nothing to pick, so the form *is* the panel.
   const [adding, setAdding] = useState(false);
-  const [name, setName] = useState("");
   const [url, setUrl] = useState("");
 
-  const source = sources.find((s) => s.id === sourceId) ?? sources[0];
-  const canAdd = /^https?:\/\/\S+$/i.test(url.trim());
+  const site = sites.find((s) => s.domain === domain) ?? sites[0];
+  const showForm = adding || sites.length === 0;
+  const canOpen = isOpenable(normalizeUrl(url));
 
-  const add = () => {
-    if (!canAdd) return;
-    onAddSource(name.trim() || domainFromUrl(url), url.trim());
-    setName("");
+  const openTyped = () => {
+    if (!canOpen) return;
+    onOpen(normalizeUrl(url));
     setUrl("");
     setAdding(false);
   };
@@ -66,64 +67,67 @@ export function SavedPanel({
     <section className="panel saved">
       <div className="posts-head">
         <h2 className="col-title">Saved List</h2>
-        <button
-          className={`filters-btn${adding ? " active" : ""}`}
-          onClick={() => setAdding((v) => !v)}
-          aria-expanded={adding}
-          title="Add another site"
-        >
-          {adding ? "Cancel" : "Add site"}
-        </button>
+        {sites.length > 0 && (
+          <button
+            className={`filters-btn${adding ? " active" : ""}`}
+            onClick={() => setAdding((v) => !v)}
+            aria-expanded={adding}
+            title="Sign in to another site"
+          >
+            {adding ? "Cancel" : "Another site"}
+          </button>
+        )}
       </div>
 
-      {adding ? (
+      {showForm ? (
         <form
           className="add-source"
           onSubmit={(e) => {
             e.preventDefault();
-            add();
+            openTyped();
           }}
         >
           <label>
-            The list's address
+            The page your list is on
             <input
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://example.com/reading-list"
+              placeholder={EXAMPLE_URL}
               autoCapitalize="none"
               autoCorrect="off"
               spellCheck={false}
             />
           </label>
-          <label>
-            What to call it
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={domainFromUrl(url) || "Example"}
-              spellCheck={false}
-            />
-          </label>
-          <button className="secondary wide-btn" type="submit" disabled={!canAdd}>
-            Add
+          <button className="primary wide-btn" type="submit" disabled={!canOpen}>
+            Open and sign in
           </button>
           <p className="hint">
-            Any page of links behind a login. It's only where the browser opens — you can navigate
-            anywhere from there.
+            It opens in a browser here. Sign in as you normally would, go to your saved posts, and
+            press <strong>Use this page</strong> — the site is remembered once that works.
+            Substack's is <code>{EXAMPLE_URL}</code>.
           </p>
         </form>
-      ) : sources.length === 0 ? (
-        <p className="hint">No sites yet — add the page your saved list lives on.</p>
       ) : (
         <>
           <label>
             Site
-            <select value={source?.id ?? ""} onChange={(e) => onSourceChange(e.target.value)}>
-              {sources.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {sourceLabel(s)}
+            <select value={site?.domain ?? ""} onChange={(e) => onDomainChange(e.target.value)}>
+              {sites.map((s) => (
+                <option key={s.domain} value={s.domain}>
+                  {s.domain}
+                </option>
+              ))}
+            </select>
+          </label>
+          {site && <p className="hint list-detail">Last read from {siteDetail(site)}</p>}
+
+          <label>
+            Take
+            <select value={cap} onChange={(e) => onCapChange(Number(e.target.value))}>
+              {CAPS.map((n) => (
+                <option key={n} value={n}>
+                  {capLabel(n)}
                 </option>
               ))}
             </select>
@@ -131,57 +135,36 @@ export function SavedPanel({
 
           <button
             className="primary wide-btn"
-            onClick={onOpenBrowser}
-            disabled={!source || !sourceIsUsable(source)}
-            title={
-              source && sourceIsUsable(source)
-                ? `Open ${sourceLabel(source)} and pick a list`
-                : "This site has no address to open"
-            }
+            onClick={() => site && onOpen(site.url)}
+            disabled={!site}
           >
-            Open {source ? sourceLabel(source) : "the site"}…
+            Open {site?.domain ?? "the site"}…
           </button>
 
           {captured ? (
             <p className="hint">
               Read {captured.count} article{captured.count === 1 ? "" : "s"} off{" "}
-              <span className="captured-from">{captured.from}</span>. Open it again to add a
-              different list — a new capture replaces this one.
+              <span className="captured-from">{captured.from}</span>. Opening it again replaces
+              them.
             </p>
           ) : (
             <p className="hint">
-              Sign in there as you normally would, go to your saved posts, and press{" "}
-              <strong>Use this page</strong>. What's on the page is what comes back.
+              You're still signed in. Go to the list, scroll far enough back, and press{" "}
+              <strong>Use this page</strong>.
             </p>
           )}
 
-          <TimeframePicker
-            days={days}
-            range={range}
-            rangeValid={rangeValid}
-            onDaysChange={onDaysChange}
-            onRangeChange={onRangeChange}
-          />
-          <p className="hint">
-            Articles the page dated are held to this; ones it didn't date are always kept.
-          </p>
-
-          <div className="source-actions">
-            {session && (
+          {site && (
+            <div className="source-actions">
               <button
-                className="link"
-                onClick={onForgetSession}
-                title={`Discard the ${session} session kept for fetching articles`}
+                className="link danger"
+                onClick={() => onForget(site.domain)}
+                title="Forget this site and the session kept for it"
               >
-                Forget the {session} session
+                Forget {site.domain}
               </button>
-            )}
-            {source && (
-              <button className="link danger" onClick={() => onRemoveSource(source.id)}>
-                Remove this site
-              </button>
-            )}
-          </div>
+            </div>
+          )}
         </>
       )}
     </section>

@@ -9,6 +9,8 @@ interface Props {
   processed: ReadonlySet<string>;
   /** Most posts one collection can return; a full list says so. */
   limit: number;
+  /** What to say when it came back full — the two inputs run out differently. */
+  limitNote: string;
   onTogglePost: (id: string) => void;
   onSetPostsSelected: (ids: string[], selected: boolean) => void;
   onTogglePublication: (name: string, selected: boolean) => void;
@@ -26,6 +28,7 @@ export function PostList({
   agentPosts,
   processed,
   limit,
+  limitNote,
   onTogglePost,
   onSetPostsSelected,
   onTogglePublication,
@@ -73,11 +76,7 @@ export function PostList({
     <section className="panel results">
       <p className="hint">Shift-click to select through to your last click.</p>
 
-      {posts.length >= limit && (
-        <p className="hint">
-          Showing the first {limit.toLocaleString()} — narrow the timeframe to reach older ones.
-        </p>
-      )}
+      {posts.length >= limit && <p className="hint">{limitNote}</p>}
 
       <div className="pub-list">
         {publications.map((pub) => {

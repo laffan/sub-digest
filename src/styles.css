@@ -1130,6 +1130,11 @@ label.check {
   margin-bottom: 12px;
 }
 
+.saved .list-detail {
+  margin: -6px 0 12px;
+  word-break: break-all;
+}
+
 /* The address a capture was read from: long, and worth seeing whole. */
 .captured-from {
   word-break: break-all;
@@ -1166,23 +1171,35 @@ label.check {
 
 /* Chrome around a real webview. The body is deliberately empty: the backend
    overlays the browser on exactly this rectangle, so anything drawn here would
-   be underneath it. Nearly the whole window, because it's a browser. */
+   be underneath it.
+
+   `dvh` rather than `vh`, and a fixed height rather than a max: on an iPad
+   `100vh` is taller than what you can actually see, and the backdrop centres
+   what it's given — so a modal sized in `vh` hangs its header off the top of
+   the screen with no way to scroll to it. */
 .modal-browser {
   max-width: none;
-  width: calc(100vw - 40px);
-  height: calc(100vh - 40px);
+  /* The backdrop pads by 20px a side and centres what it's given, so anything
+     taller than that overflows both ways and loses its header off the top. */
+  width: min(1200px, calc(100vw - 44px));
+  height: calc(100vh - 44px);
+  height: calc(100dvh - 44px);
   max-height: none;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: 0;
 }
 
+/* Head and foot hold their size; the body is what gives. Without this the
+   flex layout shrinks the header on a short window and clips its buttons. */
 .browser-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
 }
 
 .browser-title {
@@ -1197,13 +1214,12 @@ label.check {
 
 .browser-head button {
   flex: none;
+  white-space: nowrap;
 }
 
 .browser-body {
   flex: 1;
   min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
   background: #fff;
   overflow: hidden;
 }
@@ -1214,7 +1230,10 @@ label.check {
 }
 
 .browser-foot {
-  margin: 10px 2px 0;
+  flex: none;
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
 }
 
 /* ---- Preview ---- */
