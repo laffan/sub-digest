@@ -126,6 +126,70 @@ fn link_schema() -> Value {
     })
 }
 
+const TRIAGE_PROMPT: &str = "You are given the links harvested from one page of \
+saved reading — a saved-posts page, a bookmarks page, a reading list. Some are \
+articles worth putting in a reading digest. The rest are the page's own \
+furniture, which looks the same to a scraper: profile and author pages, section \
+indexes, tag and topic pages, subscribe and settings pages, comment permalinks, \
+'see more' and pagination links, and links to the site itself.\n\n\
+For each item, say whether to keep it, judging from its title and its address. \
+Keep anything that reads like one piece of writing with a headline. Drop the \
+rest. When two entries are plainly the same piece, keep the one whose title \
+reads like a headline and drop the other.\n\n\
+Return every item you were given, once, by its index. Do not invent items, do \
+not reorder them, and do not rewrite a title beyond trimming a site name or \
+stray punctuation off it. If you are unsure, keep it: the reader is going to \
+look down the list anyway, and a wrong drop is invisible to them.";
+
+/// The shape the triage pass must return, one entry per item it was given.
+fn triage_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "description": "One entry per item given, in the same order.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "The index the item was given under."
+                        },
+                        "keep": {
+                            "type": "boolean",
+                            "description": "True if this is a readable article, false if it's the page's own furniture."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "The item's title, trimmed of a site name or stray punctuation, or an empty string to keep it as it was."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "A few words saying what it is, for the log. Only needed when dropping."
+                        }
+                    },
+                    "required": ["index", "keep", "title", "reason"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+    })
+}
+
+/// What the triage pass decided about one harvested link.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Triaged {
+    pub index: usize,
+    pub keep: bool,
+    /// Empty when the title it was given stands.
+    pub title: String,
+    pub reason: String,
+}
+
 /// One article the newsletter points at, as the model read it out of the email.
 #[derive(Debug, Clone)]
 struct LinkItem {
@@ -410,6 +474,130 @@ pub async fn anthropic_test(app: AppHandle, api_key: String) -> Result<String, S
     log::info(&app, "agent", "Testing API key");
     call(&app, &api_key, body).await?;
     Ok("Connected (Claude Haiku 4.5)".to_string())
+}
+
+/// Sorts a captured page's links into articles and the page's own furniture.
+///
+/// A saved list is a mix: posts, notes that link out, profile pages, section
+/// indexes. The scraper can't tell them apart — they are all links with words on
+/// them — and the rules that could are the site's own, which is exactly what
+/// this input refuses to encode. So the judgement goes to the model, once per
+/// capture rather than once per link, over titles and addresses alone: no page
+/// has been fetched at this point, so none of their text can be in the prompt.
+///
+/// Falling back to keeping everything is deliberate. The list is about to be
+/// shown with a checkbox on every row, so a bad keep costs a glance and a bad
+/// drop costs an article the reader never learns was there.
+#[tauri::command]
+pub async fn anthropic_triage(
+    app: AppHandle,
+    api_key: String,
+    page_title: String,
+    items: Vec<Value>,
+) -> Result<Vec<Triaged>, String> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let listing = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            format!(
+                "{i}. {} — {}",
+                item.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                item.get("url").and_then(|v| v.as_str()).unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user = format!(
+        "Page: {}\n\nLinks harvested from it:\n{listing}",
+        page_title.trim()
+    );
+
+    let body = json!({
+        "model": MODEL,
+        "max_tokens": 8000,
+        "temperature": 0,
+        "system": TRIAGE_PROMPT,
+        "output_config": { "format": { "type": "json_schema", "schema": triage_schema() } },
+        "messages": [{ "role": "user", "content": user }],
+    });
+    log::info(
+        &app,
+        "agent",
+        format!("Sorting {} harvested link(s) into articles and furniture", items.len()),
+    );
+    let started = Instant::now();
+    let msg = tokio::time::timeout(
+        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+        call(&app, &api_key, body),
+    )
+    .await
+    .map_err(|_| format!("triage gave up after {REQUEST_TIMEOUT_SECS}s"))??;
+    if msg.stop_reason == "refusal" {
+        return Err("the model declined to sort this list".to_string());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        items: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        index: usize,
+        keep: bool,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        reason: String,
+    }
+    let parsed: Response = serde_json::from_str(msg.text.trim())
+        .map_err(|e| format!("triage returned something unreadable: {e}"))?;
+
+    // Only what it was actually given, and only once each. An index it invented
+    // names nothing, and a second opinion on the same item is not a vote.
+    let mut seen = std::collections::HashSet::new();
+    let out: Vec<Triaged> = parsed
+        .items
+        .into_iter()
+        .filter(|e| e.index < items.len() && seen.insert(e.index))
+        .map(|e| Triaged {
+            index: e.index,
+            keep: e.keep,
+            title: e.title.trim().to_string(),
+            reason: e.reason.trim().to_string(),
+        })
+        .collect();
+
+    let dropped = out.iter().filter(|t| !t.keep).count();
+    log::info(
+        &app,
+        "agent",
+        format!(
+            "Triage kept {}/{} in {:.1}s ({} output tokens)",
+            out.len() - dropped,
+            items.len(),
+            started.elapsed().as_secs_f32(),
+            msg.output_tokens,
+        ),
+    );
+    for t in out.iter().filter(|t| !t.keep) {
+        log::info(
+            &app,
+            "agent",
+            format!(
+                "  dropped {}{}",
+                log::ellipsize(
+                    items[t.index].get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                    70
+                ),
+                if t.reason.is_empty() { String::new() } else { format!(" — {}", t.reason) }
+            ),
+        );
+    }
+    Ok(out)
 }
 
 /// Turns one newsletter into digest entries — one per article it recommends.
@@ -884,9 +1072,66 @@ async fn fetch_url(
 const CONTENT_TAGS: &str = "p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, img";
 
 /// Tags that are page furniture wherever they appear.
-const CHROME_TAGS: [&str; 8] = [
-    "nav", "header", "footer", "aside", "form", "button", "noscript", "template",
+const CHROME_TAGS: [&str; 10] = [
+    "nav", "header", "footer", "aside", "form", "button", "noscript", "template", "script",
+    "style",
 ];
+
+/// Tags whose text is machinery rather than reading. `CONTENT_TAGS` never
+/// matches them, so the only way their text could reach the digest is a text
+/// walk that doesn't go through it — which is what `readable_text` is for.
+const CODE_TAGS: [&str; 4] = ["script", "style", "noscript", "template"];
+
+/// A page's text as a reader would see it: every text node that isn't inside
+/// machinery. `.text()` on its own takes the lot, and on a single-page app the
+/// lot is mostly its state blob.
+fn readable_text(el: scraper::ElementRef) -> String {
+    let mut out = String::new();
+    for node in el.descendants() {
+        let Some(text) = node.value().as_text() else {
+            continue;
+        };
+        let machinery = node.ancestors().any(|a| {
+            a.value()
+                .as_element()
+                .map(|e| CODE_TAGS.contains(&e.name()))
+                .unwrap_or(false)
+        });
+        if machinery {
+            continue;
+        }
+        out.push_str(text);
+        out.push(' ');
+    }
+    normalize(&out)
+}
+
+/// Whether a run of text is a page's machinery rather than its prose — a
+/// single-page app's state blob, a JSON-LD block, an inline script. Those read
+/// as text to a parser and as gibberish to a reader, and a page that offers
+/// nothing else is a page that needed JavaScript we didn't run.
+fn looks_like_code(text: &str) -> bool {
+    const TELLS: [&str; 5] = [
+        "JSON.parse(",
+        "{\"@context\"",
+        "document.documentElement",
+        "addEventListener(",
+        "window.matchMedia",
+    ];
+    if TELLS.iter().any(|t| text.contains(t)) {
+        return true;
+    }
+    // Prose puts spaces around its punctuation and doesn't use braces. A state
+    // blob is mostly braces, quotes and colons with nothing between them, and
+    // runs well past a fifth of its characters — the threshold is set high
+    // enough that quotation-heavy writing is nowhere near it.
+    let total = text.chars().count().max(1);
+    let syntax = text
+        .chars()
+        .filter(|c| matches!(c, '{' | '}' | '"' | ':' | ';' | '\\'))
+        .count();
+    syntax * 100 / total > 10
+}
 
 /// Words that name furniture when a `class` or `id` is *made of* them. Whatever
 /// they're attached to, and everything inside it, is left out of the digest —
@@ -1069,15 +1314,17 @@ fn extract(html: &str, selector: Option<&str>, base: &url::Url) -> Result<Extrac
     if !blocks.is_empty() {
         return Ok(Extracted { markdown: join_blocks(&blocks), container, paragraphs });
     }
-    // Fallback: whole-body text.
+    // Fallback: whole-body text, machinery left out of it. A page that has
+    // nothing else to give is one that renders itself in JavaScript we didn't
+    // run — better to say so than to put its state blob in the digest.
     let body = scraper::Selector::parse("body").expect("static selector");
     if let Some(b) = doc.select(&body).next() {
-        let text = normalize(&b.text().collect::<Vec<_>>().join(" "));
-        if !text.is_empty() {
+        let text = readable_text(b);
+        if !text.is_empty() && !looks_like_code(&text) {
             return Ok(Extracted { markdown: text, container: "body (plain text)".into(), paragraphs: 0 });
         }
     }
-    Err("no readable text found on the page".to_string())
+    Err("no readable text on the page — it renders itself in JavaScript".to_string())
 }
 
 /// Finds the element the body copy lives in, by how much paragraph text hangs
@@ -1140,7 +1387,7 @@ fn as_markdown(el: scraper::ElementRef, base: &url::Url) -> Option<String> {
     if el.value().name() == "img" {
         return image_markdown(el, base);
     }
-    let text = normalize(&el.text().collect::<Vec<_>>().join(" "));
+    let text = readable_text(el);
     if text.is_empty() {
         return None;
     }
@@ -1230,6 +1477,46 @@ fn truncate_output(mut s: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single-page app's state blob is text to a parser and gibberish to a
+    /// reader. Putting it in the digest is worse than saying the page was
+    /// unreadable, which is what it was.
+    #[test]
+    fn a_pages_machinery_is_not_its_prose() {
+        assert!(looks_like_code(
+            r#"{"@context":"https://schema.org","@type":"Person","name":"Neglected Books"}"#
+        ));
+        assert!(looks_like_code(
+            "window.staticRouterHydrationData = JSON.parse(\"{\\\"loaderData\\\":{}}\");"
+        ));
+        assert!(looks_like_code(
+            "if (window.matchMedia) { const match = window.matchMedia('(prefers-color-scheme: dark)'); }"
+        ));
+        // …and prose is not machinery, quotation marks, colons and all.
+        assert!(!looks_like_code(
+            "He looked out of the window. \"The life of fiction,\" he said, \"is longer than ours:              the books outlast us.\" She was unconvinced; the argument went on."
+        ));
+    }
+
+    #[test]
+    fn a_scripts_text_never_reads_as_the_pages() {
+        let html = r#"<html><body>
+            <script type="application/ld+json">{"@context":"https://schema.org"}</script>
+            <div class="post-content">
+              <p>The real article, such as it is.</p>
+              <script>window.tracker = 1;</script>
+            </div>
+          </body></html>"#;
+        let doc = scraper::Html::parse_document(html);
+        let body = doc
+            .select(&scraper::Selector::parse("body").unwrap())
+            .next()
+            .unwrap();
+        let text = readable_text(body);
+        assert!(text.contains("The real article"));
+        assert!(!text.contains("schema.org"));
+        assert!(!text.contains("window.tracker"));
+    }
 
     const PAGE: &str = r#"<html><head><style>.x{color:red}</style>
         <script>var a = 'noise';</script></head>

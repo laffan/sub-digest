@@ -49,6 +49,7 @@ pub fn run() {
             print::print_file,
             anthropic::anthropic_test,
             anthropic::anthropic_process,
+            anthropic::anthropic_triage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

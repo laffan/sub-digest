@@ -17,7 +17,7 @@ import { CoverGallery } from "./components/CoverGallery";
 import { ContentPreview } from "./components/ContentPreview";
 import { LogPane } from "./components/LogPane";
 import { log, logError, logInfo, logWarn, type LogLevel } from "./log";
-import { anthropicProcess } from "./anthropic";
+import { anthropicProcess, anthropicTriage } from "./anthropic";
 import { clearProcessed, loadProcessed, markProcessed } from "./processed";
 import {
   FILTERS_KEY,
@@ -422,10 +422,43 @@ export default function App() {
     setCapturing(true);
     try {
       const capture = await savedCapture();
+
+      // A saved page is a mix — posts, notes that link out, profile pages,
+      // section indexes — and to a scraper they are all links with words on
+      // them. With a key set, the model sorts them once per capture; without
+      // one the harvest's own rules stand, and either way the list arrives with
+      // a checkbox on every row.
+      let harvested = capture.items;
+      if (anthropicKey.trim() && harvested.length > 0) {
+        try {
+          const verdicts = await anthropicTriage(
+            anthropicKey,
+            capture.pageTitle,
+            harvested.map((item) => ({ title: item.title, url: item.url }))
+          );
+          const byIndex = new Map(verdicts.map((v) => [v.index, v]));
+          const sorted = harvested
+            .map((item, index) => ({ item, verdict: byIndex.get(index) }))
+            .filter(({ verdict }) => verdict?.keep !== false);
+          // Everything dropped is the model having found nothing but furniture,
+          // which is likelier to be its mistake than the page's.
+          if (sorted.length > 0) {
+            harvested = sorted.map(({ item, verdict }) =>
+              verdict?.title ? { ...item, title: verdict.title } : item
+            );
+          } else {
+            logWarn("agent", "Triage kept nothing — using the harvest as it came");
+          }
+        } catch (e) {
+          // A digest is not worth failing over a sorting step.
+          logWarn("agent", `Could not sort the captured links (${e}) — using them as they came`);
+        }
+      }
+
       // The page's own order is the only claim about recency worth trusting:
       // most sites don't date the rows on a saved page at all. So the cap comes
       // off the top of the page, before anything is sorted.
-      const taken = cap > 0 ? capture.items.slice(0, cap) : capture.items;
+      const taken = cap > 0 ? harvested.slice(0, cap) : harvested;
       // An entry has to carry a date — the byline under its title says when, and
       // so does the span on the cover — so an undated article is dated the day
       // it was collected. The log says how many, since that's a stand-in.
@@ -464,10 +497,10 @@ export default function App() {
         `Took ${found.length} article${found.length === 1 ? "" : "s"} from ${pubs.size} ` +
           `publication${pubs.size === 1 ? "" : "s"} off ${capture.pageUrl}`
       );
-      if (capture.items.length > taken.length) {
+      if (harvested.length > taken.length) {
         logInfo(
           "saved",
-          `${capture.items.length - taken.length} further article(s) on the page were left, ` +
+          `${harvested.length - taken.length} further article(s) on the page were left, ` +
             `past the ${cap} asked for`
         );
       }
@@ -490,7 +523,7 @@ export default function App() {
     } finally {
       setCapturing(false);
     }
-  }, [cap, fail]);
+  }, [cap, anthropicKey, fail]);
 
   const toggleFilter = useCallback((id: string, enabled: boolean) => {
     setFilters((fs) => fs.map((f) => (f.id === id ? { ...f, enabled } : f)));

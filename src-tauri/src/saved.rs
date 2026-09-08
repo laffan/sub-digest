@@ -76,6 +76,13 @@ const HARVEST_JS: &str = r##"
     href = href.split("#")[0];
     if (href === here) continue;
     if (furniture(a)) continue;
+    // A site's front page, or somebody's profile, is not an article however
+    // many words its link carries — and a card names its author as often as it
+    // names its subject. One path segment starting @ or ~ is the convention.
+    var path = href.replace(/^https?:\/\/[^/]+/i, "").replace(/\/+$/, "");
+    var segments = path.split("/").filter(Boolean);
+    if (segments.length === 0) continue;
+    if (segments.length === 1 && /^[@~]/.test(segments[0])) continue;
     var title = clean(a.innerText || a.textContent);
     // A card usually wraps its picture and its headline in separate links to
     // the same place. The headline is the one with the words on it.

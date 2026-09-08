@@ -253,8 +253,21 @@ all. (There's no "last 30 days" here for the same reason.)
 
 A link with words on it that isn't page furniture. Navigation, headers, footers
 and sidebars are skipped; so are links with fewer than ten characters of text,
-which is what a card's picture link has. Duplicates fold together and the
-longest text wins, since a card usually links to the same post twice.
+which is what a card's picture link has, and links to a site's front page or to
+somebody's profile — a card names its author as often as it names its subject.
+Duplicates fold together and the longest text wins, since a card usually links
+to the same post twice.
+
+Those rules only go so far, because a saved page is a mix. A post and a note
+that links out to a post are the same shape to a scraper: a link with a headline
+on it. So **with an Anthropic key set, the model sorts the harvest** — once per
+capture, over titles and addresses alone, no page having been fetched at that
+point — into articles and the page's own furniture, and tidies a title that
+carries a site name. What it drops is named in the log. Without a key the rules
+above stand on their own, and either way the list arrives with a checkbox on
+every row: the sorting is there to save you unticking things, not to decide for
+you. If it kept nothing at all, that's taken as its mistake and the harvest is
+used as it came.
 
 Then the app looks at the card the link sits in — climbing until the thing above
 stops being a single item — for a `<time>` to date it by and a byline. Whatever
@@ -288,6 +301,14 @@ out of an AI-agent newsletter: the body copy is located, taken as Markdown with
 its images, and page furniture dropped. An article that can't be fetched is
 logged and left out rather than becoming an entry with a title and nothing under
 it.
+
+A page that renders itself in JavaScript is the one thing the scraper can't
+read, and it used to fail in a way worth naming: with no readable tags to find,
+the whole-body fallback took every text node in the document — which on a
+single-page app is its state blob, a wall of `{"key":"value"}` where the article
+should be. Script and style text is now left out of that walk, and a fallback
+that still comes back looking like machinery rather than prose is refused, so
+the entry is dropped with a line in the log instead of arriving full of JSON.
 
 The AI agent has no part in this input and needs no API key: the agent exists to
 find links inside a newsletter, and a saved list has already done that.
@@ -531,6 +552,8 @@ Two things worth knowing about what comes out:
 | Filters → Gmail queries | `src-tauri/src/gmail.rs` | Domains, addresses and sender names are alternatives on one `from:` (no message is from two senders); subject slices become `subject:("…" OR "…")`, search terms bare phrases, and the kinds are ANDed. Each **enabled filter runs as its own query** rather than one big OR — a search term matches the body, so which filter caught a message can't be worked out from its headers afterwards, and every message has to come back knowing. Ids are unioned first and headers fetched once, so a message two filters found still costs one metadata request. Quotes are what delimits a phrase, so they're stripped from the text rather than escaped, and a `from:` operand that would need quoting is dropped instead — a filter can't break out of its own query. Unit-tested |
 | Which filter reads a post | `src/filters.ts` (`decidingFilter`) | A message can match several filters, and one of them has to decide whether the agent runs. An agentic filter wins — carving the roundups out with a filter of their own is exactly what one is for, so it shouldn't lose to the broad filter that happens to catch them too — and otherwise it's the first in the user's own order. The scan list applies the same rule up front, so the `agent` marks there are what a run will actually do |
 | Email HTML → content blocks | `src/parse.ts` | Strips Substack chrome (subscribe buttons, footers, tracking pixels); also `markdownToBlocks` for agent output |
+| Sorting a capture | `src-tauri/src/anthropic.rs` (`anthropic_triage`) | A saved page mixes posts, notes that link out, profile pages and section indexes, and to a scraper they're all links with words on them. The rules that tell them apart are each site's own — which is exactly what this input refuses to encode — so the judgement goes to the model instead: one call per capture rather than per link, over titles and addresses, with no page fetched yet to put in the prompt. Only indices it was actually given count, and only once each. It fails open in both directions — no key, a refusal, or a verdict that kept nothing all leave the harvest as it came — because the list is about to be shown with a checkbox on every row, so a bad keep costs a glance and a bad drop costs an article you never learn was there |
+| Reading a page that won't be read | `src-tauri/src/anthropic.rs` (`readable_text`, `looks_like_code`) | `.text()` on an element takes every text node under it, and on a single-page app most of those are its inline scripts — which is how a profile page arrived in the digest as its own hydration blob. Script and style text is skipped by the walk now, and text that still reads as machinery (a JSON-LD block, `JSON.parse(`, a fifth of its characters braces and quotes) is refused rather than kept, so the page is reported unreadable instead of being pasted in. Unit-tested, prose full of quotation marks included |
 | Per-filter AI agent | `src-tauri/src/anthropic.rs` | Optional agent (Claude Haiku 4.5, `temperature: 0`) switched on per filter, for link-roundup newsletters; returns one entry per linked article. **Exactly one model call**, and its only job is naming the links — **structured outputs** (`output_config.format` with a JSON schema) give back title, author, URL and the newsletter's note, all quoted from the email rather than composed. Everything after that is code: the app resolves each link, scrapes the article, and assembles the entry. Nothing in the digest is generated, so the model can't invent text and isn't spending a minute a newsletter retyping what the scraper already has. Every URL it returns is checked against the email character for character, and one that isn't there is logged as a warning. API key set in Settings; runs in Rust (no CORS). Bounded so a stall can't pass for a hang: at most 4 pages fetched at once, 45s per page, 120s for the model call, and 4 minutes for a whole newsletter, after which it gives up and the default parser takes over |
 | Link resolution | `src-tauri/src/anthropic.rs` | Newsletter redirect wrappers are followed to the real article, then re-fetched without the query string (tracking parameters can land on an error page where the bare URL serves the piece), falling back to the original if that doesn't pan out. Every URL in the chain is logged, and the address the text actually came from is the one printed under the title |
 | Scrape → Markdown | `src-tauri/src/anthropic.rs` | The page's readable tags become Markdown — headings nested under the entry's own, lists as lists, quotes as quotes, images as images — with nested matches emitted once. Image addresses are resolved against the page, and lazy-loaded `data-src`/`srcset` are read, so a placeholder `src` doesn't cost you the picture |
