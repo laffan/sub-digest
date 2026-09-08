@@ -332,17 +332,58 @@ mod desktop {
 })();
 "#;
 
+    /// Where the HTML sits inside the window's own coordinate space.
+    ///
+    /// A child webview is placed relative to the window; the rectangle the modal
+    /// reports comes from `getBoundingClientRect`, which is relative to the
+    /// *page*. Those two agree only when the main webview starts at the window's
+    /// origin — and it doesn't when the window has a full-size content view, as
+    /// a Mac's does: the page begins below the title bar, so a rectangle taken
+    /// from it lands that much too high and the browser is drawn over the
+    /// modal's own header.
+    ///
+    /// So rather than assume either way, ask: the main webview's own position is
+    /// the offset, measured through the same code path that will place the
+    /// child. It's zero when the two spaces already agree, which makes this a
+    /// correction where one is needed and nothing at all where it isn't. (The
+    /// iPad half does the same thing with `hostWebView.frame.origin`.)
+    fn viewport_offset(app: &AppHandle) -> (f64, f64) {
+        let Some(main) = app.get_webview("main") else {
+            return (0.0, 0.0);
+        };
+        let Ok(position) = main.position() else {
+            return (0.0, 0.0);
+        };
+        let scale = app
+            .get_window("main")
+            .and_then(|w| w.scale_factor().ok())
+            .unwrap_or(1.0);
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        (
+            (position.x as f64 / scale).max(0.0),
+            (position.y as f64 / scale).max(0.0),
+        )
+    }
+
     pub fn open(app: &AppHandle, url: url::Url, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
         close(app);
         let window = app
             .get_window("main")
             .ok_or("the main window has gone missing")?;
+        let (dx, dy) = viewport_offset(app);
+        if dx != 0.0 || dy != 0.0 {
+            log::info(
+                app,
+                "saved",
+                format!("Placing the browser at {}, {} (the page sits {dx}, {dy} inside the window)", x + dx, y + dy),
+            );
+        }
         let builder = tauri::webview::WebviewBuilder::new(LABEL, tauri::WebviewUrl::External(url))
             .initialization_script(NEUTER_POPUPS);
         window
             .add_child(
                 builder,
-                LogicalPosition::new(x, y),
+                LogicalPosition::new(x + dx, y + dy),
                 LogicalSize::new(w.max(50.0), h.max(50.0)),
             )
             .map_err(|e| format!("could not open the browser: {e}"))?;
@@ -351,8 +392,15 @@ mod desktop {
 
     pub fn set_bounds(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) {
         if let Some(webview) = app.get_webview(LABEL) {
-            let _ = webview.set_position(LogicalPosition::new(x, y));
-            let _ = webview.set_size(LogicalSize::new(w.max(50.0), h.max(50.0)));
+            let (dx, dy) = viewport_offset(app);
+            // One `set_bounds` rather than a position then a size: each of those
+            // is a round trip that reads the current rectangle back and rewrites
+            // it, so sending them separately puts the webview somewhere neither
+            // call meant for as long as it takes the second to arrive.
+            let _ = webview.set_bounds(tauri::Rect {
+                position: LogicalPosition::new(x + dx, y + dy).into(),
+                size: LogicalSize::new(w.max(50.0), h.max(50.0)).into(),
+            });
         }
     }
 

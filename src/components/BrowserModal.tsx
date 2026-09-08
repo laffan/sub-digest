@@ -74,9 +74,16 @@ export function BrowserModal({ url, capturing, notice, onCapture, onClose }: Pro
     observer.observe(el);
     window.addEventListener("resize", sync);
     sync();
+    // The observer only fires when the body's *size* changes, and the rectangle
+    // that matters is where it is. Two more passes catch anything that settles
+    // after the first paint — a font arriving, a scrollbar going.
+    const frame = requestAnimationFrame(sync);
+    const settled = window.setTimeout(sync, 250);
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", sync);
+      cancelAnimationFrame(frame);
+      window.clearTimeout(settled);
     };
   }, [opened]);
 
