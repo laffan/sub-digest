@@ -6,7 +6,7 @@ import { InputPicker } from "./components/InputPicker";
 import { MailPanel } from "./components/MailPanel";
 import { PostList } from "./components/PostList";
 import { SavedPanel } from "./components/SavedPanel";
-import { SourceEditorModal } from "./components/SourceEditorModal";
+import { BrowserModal } from "./components/BrowserModal";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { FilterEditorModal } from "./components/FilterEditorModal";
@@ -28,16 +28,15 @@ import {
   loadFilters,
 } from "./filters";
 import { blockSignature, rememberedKeys, withSignatures } from "./remember";
-import { SOURCES_KEY, loadSources, type SavedSource, type SignInMethod } from "./sources";
 import {
-  savedCollect,
-  savedFetch,
-  savedRequestLink,
-  savedSignIn,
-  savedSignOut,
-  savedStatus,
-  type SignInDetails,
-} from "./saved";
+  SOURCES_KEY,
+  loadSources,
+  newSourceId,
+  openingUrl,
+  sourceLabel,
+  type SavedSource,
+} from "./sources";
+import { savedCapture, savedFetch, savedForget, savedHasSession } from "./saved";
 import { orderPosts, type PostOrder } from "./order";
 import { COVER_RESULTS, artworkLabel, metSearch } from "./met";
 import { markdownToBlocks } from "./parse";
@@ -79,6 +78,8 @@ const ANTHROPIC_KEY = "subdigest.anthropicKey";
 const INPUT_KEY = "subdigest.input";
 /** Matches MAX_MESSAGES in the Rust backend. */
 const SCAN_LIMIT = 1000;
+/** Matches MAX_ITEMS in the saved-list backend, and the harvest script's own. */
+const CAPTURE_LIMIT = 500;
 
 function loadInput(): InputKind {
   return localStorage.getItem(INPUT_KEY) === "saved" ? "saved" : "gmail";
@@ -114,18 +115,18 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
 
   // The saved-list input: the sites it knows about, which one is picked, and
-  // the session it has with that one. Sessions live in the backend — the most
-  // this side ever sees is the name of the account a sign-in landed on.
+  // whether its browser is open. Sessions live in the backend — the most this
+  // side ever sees is the domain one is kept for.
   const [sources, setSources] = useState<SavedSource[]>(loadSources);
   const [sourceId, setSourceId] = useState("");
-  const [listId, setListId] = useState("");
-  const [savedAccount, setSavedAccount] = useState<string | null>(null);
-  const [signingIn, setSigningIn] = useState(false);
-  const [collecting, setCollecting] = useState(false);
-  // What the last sign-in step had to say — "check your mail", usually.
-  const [savedNotice, setSavedNotice] = useState<string | null>(null);
-  const [savedLimit, setSavedLimit] = useState(50);
-  const [showSources, setShowSources] = useState(false);
+  const [session, setSession] = useState<string | null>(null);
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  // Said inside the browser rather than behind it: a capture that found nothing
+  // leaves the modal open, because the fix is to navigate and try again.
+  const [captureNotice, setCaptureNotice] = useState<string | null>(null);
+  // What the last capture read, for the line under the button.
+  const [captured, setCaptured] = useState<{ count: number; from: string } | null>(null);
   const [days, setDays] = useState(30);
   // Only consulted when `days === CUSTOM_RANGE`; defaults to the last month.
   const [range, setRange] = useState<DateRange>(() => ({
@@ -279,30 +280,26 @@ export default function App() {
     localStorage.setItem(ANTHROPIC_KEY, key);
   }, []);
 
-  // The source and list on screen: what's picked, or the first there is. A
-  // source removed in the editor leaves the picker on something real rather
-  // than on nothing.
+  // The site on screen: what's picked, or the first there is. A site removed
+  // leaves the picker on something real rather than on nothing.
   const source = useMemo(
     () => sources.find((s) => s.id === sourceId) ?? sources[0],
     [sources, sourceId]
   );
-  const list = useMemo(
-    () => source?.lists.find((l) => l.id === listId) ?? source?.lists[0],
-    [source, listId]
-  );
 
-  // Who the picked source is signed in as. The session is stored on the device,
-  // so it survives a restart the way the Gmail token does.
+  // Whether the picked site has a session kept for it. It's stored on the
+  // device, so it survives a restart the way the Gmail token does — and it's
+  // only ever used to fetch that site's own articles.
   useEffect(() => {
     const id = source?.id;
     if (!id) {
-      setSavedAccount(null);
+      setSession(null);
       return;
     }
     let live = true;
-    savedStatus(id)
-      .then((who) => live && setSavedAccount(who))
-      .catch(() => live && setSavedAccount(null));
+    savedHasSession(id)
+      .then((domain) => live && setSession(domain))
+      .catch(() => live && setSession(null));
     return () => {
       live = false;
     };
@@ -319,7 +316,7 @@ export default function App() {
     setPrepared([]);
     setOutput(null);
     setError(null);
-    setSavedNotice(null);
+    setCaptured(null);
     setStep("select");
   }, []);
 
@@ -397,87 +394,65 @@ export default function App() {
     }
   }, [scanWindow, scanFilters, fail]);
 
-  /**
-   * Signs in to the picked source. Which of the three ways in this is — a
-   * pasted link, a password, a pasted cookie — is the panel's business; all
-   * that comes back here is the account it landed on.
-   */
-  const signIn = useCallback(
-    async (method: SignInMethod, details: SignInDetails) => {
-      if (!source) return;
-      setError(null);
-      setSavedNotice(null);
-      setSigningIn(true);
-      try {
-        setSavedAccount(await savedSignIn(source, method, details));
-      } catch (e) {
-        fail("saved", e);
-      } finally {
-        setSigningIn(false);
-      }
+  const addSource = useCallback((name: string, url: string) => {
+    const added: SavedSource = { id: newSourceId(), name, url };
+    setSources((list) => [...list, added]);
+    setSourceId(added.id);
+  }, []);
+
+  const removeSource = useCallback(
+    (id: string) => {
+      savedForget(id).catch(() => {});
+      setSources((list) => list.filter((s) => s.id !== id));
+      setSourceId("");
+      setCaptured(null);
+      setPosts([]);
     },
-    [source, fail]
+    []
   );
 
-  /** Asks the site to mail a sign-in link, so the flow starts inside the app. */
-  const requestLink = useCallback(
-    async (email: string) => {
-      if (!source) return;
-      setError(null);
-      setSigningIn(true);
-      try {
-        setSavedNotice(await savedRequestLink(source, email));
-      } catch (e) {
-        fail("saved", e);
-      } finally {
-        setSigningIn(false);
-      }
-    },
-    [source, fail]
-  );
-
-  const signOutSaved = useCallback(async () => {
+  const forgetSession = useCallback(() => {
     if (!source) return;
-    await savedSignOut(source.id).catch(() => {});
-    setSavedAccount(null);
-    setSavedNotice(null);
-    setPosts([]);
-    setOutput(null);
-    setStep("select");
-    logInfo("saved", `Signed out of ${source.name}`);
+    savedForget(source.id).catch(() => {});
+    setSession(null);
+    logInfo("saved", `Forgot the session kept for ${sourceLabel(source)}`);
   }, [source]);
 
   /**
-   * Collects the picked list: the articles on it, as posts. They arrive in the
-   * same shape a scanned email does, which is the whole point — everything
-   * after this step is the work it always was.
+   * **Use this page**: reads the list the browser is showing, and turns it into
+   * posts. They arrive in the same shape a scanned email does, which is the
+   * whole point — everything after this step is the work it always was.
+   *
+   * The page is also remembered as where this site opens next time, since a
+   * saved list is somewhere you go back to.
    */
-  const collect = useCallback(async () => {
-    if (!source || !list || !scanWindow) return;
+  const captureList = useCallback(async () => {
+    if (!source) return;
     setError(null);
-    setCollecting(true);
-    logInfo("saved", `Collecting "${list.name || "list"}" from ${source.name}`);
+    setCaptureNotice(null);
+    setCapturing(true);
     try {
-      const items = await savedCollect(
-        source,
-        list,
-        savedLimit,
-        scanWindow.after,
-        scanWindow.before
-      );
-      // A list that doesn't say when something was saved leaves the date at 0,
-      // and an entry has to be dated: the byline under its title says when, and
-      // so does the span on the cover. The day it was collected is the honest
-      // answer to "when did this reach me", so that's what it gets — and the
-      // log says how many, since it's a stand-in rather than a fact.
+      const capture = await savedCapture(source.id);
+      const within = scanWindow;
+      // The page dated what it dated. An article it didn't date can't be held
+      // to a timeframe, so it's kept and dated today — an entry has to carry a
+      // date, and the day it was collected is the honest answer to when it
+      // reached you. The log says how many, since that's a stand-in for a fact.
       const collectedAt = Date.now();
-      const undated = items.filter((item) => item.dateMs <= 0).length;
-      const found: Post[] = items
+      const inWindow = capture.items.filter(
+        (item) =>
+          item.dateMs <= 0 ||
+          !within ||
+          ((within.after <= 0 || item.dateMs >= within.after) &&
+            (within.before <= 0 || item.dateMs < within.before))
+      );
+      const undated = inWindow.filter((item) => item.dateMs <= 0).length;
+      const found: Post[] = inWindow
         .map((item) => ({
           id: item.id,
           // Nothing reads this for a saved article — the byline and the
           // publication are already their own fields — but it's what a From
-          // header is for, so it carries whoever the list named.
+          // header is for, so it carries whoever the page named.
           from: item.author || item.publication,
           subject: item.title,
           dateMs: item.dateMs > 0 ? item.dateMs : collectedAt,
@@ -490,27 +465,50 @@ export default function App() {
           author: item.author || undefined,
         }))
         .sort((a, b) => b.dateMs - a.dateMs);
+
       setPosts(found);
+      setCaptured({ count: found.length, from: capture.pageUrl });
+      setSources((list) =>
+        list.map((s) => (s.id === source.id ? { ...s, lastUrl: capture.pageUrl } : s))
+      );
+      setSession(await savedHasSession(source.id).catch(() => null));
+      // Nothing found leaves the browser open: the page shown was a sign-in
+      // screen or the wrong page, and both are fixed by navigating, not by
+      // starting over.
+      if (found.length > 0) setBrowserOpen(false);
+
       const pubs = new Set(found.map((p) => p.publication));
       logInfo(
         "saved",
-        `Collected ${found.length} article${found.length === 1 ? "" : "s"} from ${pubs.size} ` +
-          `publication${pubs.size === 1 ? "" : "s"}`
+        `Took ${found.length} article${found.length === 1 ? "" : "s"} from ${pubs.size} ` +
+          `publication${pubs.size === 1 ? "" : "s"} off ${capture.pageUrl}`
       );
+      const skipped = capture.items.length - inWindow.length;
+      if (skipped > 0) {
+        logInfo("saved", `${skipped} article(s) on the page fell outside the timeframe`);
+      }
       if (undated > 0) {
         logWarn(
           "saved",
-          `${undated} article${undated === 1 ? " carried" : "s carried"} no date on the list — ` +
+          `${undated} article${undated === 1 ? " carried" : "s carried"} no date on the page — ` +
             `dated today, so ${undated === 1 ? "it sits" : "they sit"} at the end of a ` +
             `chronological digest`
         );
       }
+      if (found.length === 0) {
+        setCaptureNotice(
+          capture.items.length > 0
+            ? "Everything on that page fell outside the timeframe."
+            : "Nothing on that page looked like an article — go to the list itself and try again."
+        );
+      }
     } catch (e) {
+      setCaptureNotice(String(e));
       fail("saved", e);
     } finally {
-      setCollecting(false);
+      setCapturing(false);
     }
-  }, [source, list, savedLimit, scanWindow, fail]);
+  }, [source, scanWindow, fail]);
 
   const toggleFilter = useCallback((id: string, enabled: boolean) => {
     setFilters((fs) => fs.map((f) => (f.id === id ? { ...f, enabled } : f)));
@@ -994,7 +992,7 @@ export default function App() {
               <InputPicker
                 value={input}
                 onChange={chooseInput}
-                disabled={scanning || collecting}
+                disabled={scanning || capturing}
               />
 
               {input === "gmail" ? (
@@ -1027,25 +1025,17 @@ export default function App() {
                   sources={sources}
                   sourceId={source?.id ?? ""}
                   onSourceChange={setSourceId}
-                  account={savedAccount}
-                  signingIn={signingIn}
-                  onSignIn={signIn}
-                  onRequestLink={requestLink}
-                  onSignOut={signOutSaved}
-                  listId={list?.id ?? ""}
-                  onListChange={setListId}
-                  limit={savedLimit}
-                  onLimitChange={setSavedLimit}
-                  collecting={collecting}
-                  onCollect={collect}
-                  onEditSources={() => setShowSources(true)}
-                  notice={savedNotice}
+                  onAddSource={addSource}
+                  onRemoveSource={removeSource}
+                  session={session}
+                  onForgetSession={forgetSession}
+                  onOpenBrowser={() => setBrowserOpen(true)}
+                  captured={captured}
                   days={days}
                   range={range}
                   rangeValid={scanWindow !== null}
                   onDaysChange={setDays}
                   onRangeChange={setRange}
-                  found={posts.length}
                 />
               )}
 
@@ -1053,7 +1043,7 @@ export default function App() {
                 posts={posts}
                 agentPosts={agentPosts}
                 processed={processedBefore}
-                limit={input === "gmail" ? SCAN_LIMIT : savedLimit}
+                limit={input === "gmail" ? SCAN_LIMIT : CAPTURE_LIMIT}
                 onTogglePost={togglePost}
                 onSetPostsSelected={setPostsSelected}
                 onTogglePublication={togglePublication}
@@ -1213,11 +1203,14 @@ export default function App() {
 
       {showLog && <LogPane onClose={() => setShowLog(false)} />}
 
-      {showSources && (
-        <SourceEditorModal
-          sources={sources}
-          onChange={setSources}
-          onClose={() => setShowSources(false)}
+      {browserOpen && source && (
+        <BrowserModal
+          url={openingUrl(source)}
+          name={sourceLabel(source)}
+          capturing={capturing}
+          notice={captureNotice}
+          onCapture={captureList}
+          onClose={() => setBrowserOpen(false)}
         />
       )}
 

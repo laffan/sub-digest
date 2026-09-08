@@ -602,13 +602,12 @@ label.check.inline.agent-toggle {
   .filter-menu .menu-item {
     min-height: 36px;
   }
-  /* The input picker and the sign-in form are the first things touched on an
-     iPad, and a pasted sign-in link is typed into with a thumb. */
+  /* The input picker and the browser's chrome are the first things touched on
+     an iPad, and Use this page is the button the whole input turns on. */
   .segment,
-  .paste-box,
-  .source-list-head input,
-  .source-list-head select,
-  .wide-btn {
+  .wide-btn,
+  .add-source input,
+  .browser-head button {
     min-height: 44px;
   }
 }
@@ -1093,18 +1092,13 @@ label.check {
 
 /* Where a session's reading comes from. Same segmented control as the output
    format picker, since it's the same kind of choice: one of two, both real. */
-.segmented,
-.method-row {
+.segmented {
   display: flex;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fbfaf8;
-}
-
-.method-row {
-  margin-bottom: 12px;
 }
 
 .segment {
@@ -1132,44 +1126,31 @@ label.check {
   margin-bottom: 10px;
 }
 
-.saved .account-row.signed-in {
+.saved .hint {
+  margin-bottom: 12px;
+}
+
+/* The address a capture was read from: long, and worth seeing whole. */
+.captured-from {
+  word-break: break-all;
+  color: var(--ink);
+}
+
+.add-source {
+  margin-bottom: 4px;
+}
+
+.source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
   margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
-.saved .list-summary {
-  margin: -6px 0 12px;
-  word-break: break-all;
-}
-
-.saved .hint.notice {
-  margin-top: 10px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: #f2f5ee;
-  border: 1px solid #d8e0cd;
-  color: var(--ink);
-}
-
-/* A pasted sign-in link or cookie: long, wrapping, and never spell-checked. */
-.paste-box {
-  display: block;
-  width: 100%;
-  margin-top: 3px;
-  padding: 6px 8px;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.4;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fbfaf8;
-  color: var(--ink);
-  resize: vertical;
-  word-break: break-all;
-}
-
-.paste-box:focus {
-  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-color: var(--accent);
+.source-actions .link {
+  margin-bottom: 0;
 }
 
 .wide-btn {
@@ -1181,72 +1162,59 @@ label.check {
   margin-top: 4px;
 }
 
-/* The endpoints behind a source: there when a site needs them, folded away
-   when it doesn't, since the common case is a name and an address. */
-.advanced {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
+/* ---- The in-app browser ---- */
 
-.advanced > summary {
-  cursor: pointer;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  margin-bottom: 10px;
-}
-
-.check-row {
+/* Chrome around a real webview. The body is deliberately empty: the backend
+   overlays the browser on exactly this rectangle, so anything drawn here would
+   be underneath it. Nearly the whole window, because it's a browser. */
+.modal-browser {
+  max-width: none;
+  width: calc(100vw - 40px);
+  height: calc(100vh - 40px);
+  max-height: none;
+  overflow: hidden;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  margin-bottom: 12px;
-  font-size: 12px;
+  flex-direction: column;
+  padding: 12px;
 }
 
-.source-lists {
-  margin-top: 14px;
-}
-
-.source-lists .col-title {
-  margin-bottom: 8px;
-}
-
-.source-list {
-  padding: 10px;
-  margin-bottom: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #fbfaf8;
-}
-
-.source-list-head {
+.browser-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
 }
 
-.source-list-head input {
+.browser-title {
   flex: 1;
   min-width: 0;
-  margin-top: 0;
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.source-list-head select {
+.browser-head button {
   flex: none;
-  width: auto;
-  margin-top: 0;
 }
 
-.source-list .hint {
-  margin-top: -4px;
+.browser-body {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
 }
 
-.rule-add-btn {
-  width: 100%;
+.browser-placeholder {
+  padding: 24px;
+  text-align: center;
+}
+
+.browser-foot {
+  margin: 10px 2px 0;
 }
 
 /* ---- Preview ---- */

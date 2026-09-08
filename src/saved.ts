@@ -1,117 +1,81 @@
 /**
- * The saved-list input's side of the backend: sign in to a source, read one of
- * its lists, and fetch an article off it.
+ * The saved-list input's side of the backend: drive the in-app browser, read
+ * the page it's showing, and fetch an article off what it found.
  *
- * Only the recipe crosses over. Sessions live in Rust, in the app's data
- * directory, and this side never holds a cookie — the most it ever sees is the
- * name of the account a sign-in landed on.
+ * The browser is a real webview owned by the backend — a child webview on the
+ * Mac, a native one on the iPad — positioned over the modal that frames it.
+ * This side only says where to put it and when to read it. Sessions live in
+ * Rust; nothing here ever holds a cookie.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { SavedList, SavedSource, SignInMethod } from "./sources";
-import { sourceDomain } from "./sources";
 
-/** One article on a list, as the backend read it. */
+/** Where the browser should sit, in CSS pixels from the window's top left. */
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** One article read off the page. */
 export interface SavedItem {
   id: string;
   title: string;
   url: string;
-  /** Empty when the list didn't name a writer. */
+  /** Empty when the page didn't name a writer. */
   author: string;
   publication: string;
-  /** 0 when the list didn't date it. */
+  /** 0 when the page didn't date it. */
   dateMs: number;
 }
 
-/** The recipe as the backend wants it — the domain resolved, nothing derived there. */
-function recipe(source: SavedSource) {
-  return {
-    id: source.id,
-    name: source.name || "this source",
-    domain: sourceDomain(source),
-    cookieName: source.cookieName,
-    linkRequestUrl: source.linkRequestUrl,
-    passwordUrl: source.passwordUrl,
-    probeUrl: source.probeUrl,
-    probeFields: source.probeFields,
-  };
+/** What **Use this page** brought back. */
+export interface Capture {
+  pageUrl: string;
+  pageTitle: string;
+  items: SavedItem[];
 }
 
-function listRecipe(list: SavedList) {
-  return {
-    name: list.name || "this list",
-    urls: list.urls.filter((u) => u.trim().length > 0),
-    kind: list.kind,
-    itemsPath: list.itemsPath,
-    linkSelector: list.linkSelector,
-  };
+/** Opens the browser at `url`, covering `rect`. */
+export function savedOpen(url: string, rect: Rect): Promise<void> {
+  return invoke<void>("saved_open", { url, ...rect });
 }
 
-/** Asks the site to mail a sign-in link; resolves with what to do next. */
-export function savedRequestLink(source: SavedSource, email: string): Promise<string> {
-  return invoke<string>("saved_request_link", { source: recipe(source), email });
+/** Keeps the browser glued to the modal's body as the window changes shape. */
+export function savedBounds(rect: Rect): Promise<void> {
+  return invoke<void>("saved_bounds", { ...rect });
 }
 
-/** What one sign-in attempt carries; only the field its method uses is read. */
-export interface SignInDetails {
-  email?: string;
-  password?: string;
-  /** The sign-in link the site mailed, pasted rather than opened. */
-  link?: string;
-  /** A session cookie copied out of a browser. */
-  cookie?: string;
+export function savedBack(): Promise<void> {
+  return invoke<void>("saved_back");
 }
 
-/** Signs in and keeps the session; resolves with the account it landed on. */
-export function savedSignIn(
-  source: SavedSource,
-  method: SignInMethod,
-  details: SignInDetails
-): Promise<string> {
-  return invoke<string>("saved_sign_in", {
-    source: recipe(source),
-    method,
-    email: details.email ?? "",
-    password: details.password ?? "",
-    link: details.link ?? "",
-    cookie: details.cookie ?? "",
-  });
-}
-
-/** The account a source is signed in as, or null. */
-export function savedStatus(sourceId: string): Promise<string | null> {
-  return invoke<string | null>("saved_status", { sourceId });
-}
-
-export function savedSignOut(sourceId: string): Promise<void> {
-  return invoke<void>("saved_sign_out", { sourceId });
+export function savedClose(): Promise<void> {
+  return invoke<void>("saved_close");
 }
 
 /**
- * Collects one list: the articles on it, newest first. `afterMs`/`beforeMs` are
- * the session's date window, either bound 0 for open-ended — the same window
- * the mail scan uses, so a timeframe means the same thing whichever input it's
- * applied to. An item the list didn't date is never excluded by one.
+ * Reads the page the browser is showing, and keeps the session that made it
+ * readable. That session is what gets a subscriber-only article back later.
  */
-export function savedCollect(
-  source: SavedSource,
-  list: SavedList,
-  limit: number,
-  afterMs: number,
-  beforeMs: number
-): Promise<SavedItem[]> {
-  return invoke<SavedItem[]>("saved_collect", {
-    source: recipe(source),
-    list: listRecipe(list),
-    limit,
-    afterMs,
-    beforeMs,
-  });
+export function savedCapture(sourceId: string): Promise<Capture> {
+  return invoke<Capture>("saved_capture", { sourceId });
+}
+
+/** Forgets a site's session; the browser's own cookies are left alone. */
+export function savedForget(sourceId: string): Promise<void> {
+  return invoke<void>("saved_forget", { sourceId });
+}
+
+/** The domain a site has a session kept for, or null. */
+export function savedHasSession(sourceId: string): Promise<string | null> {
+  return invoke<string | null>("saved_has_session", { sourceId });
 }
 
 /**
  * Fetches one saved article as Markdown — the same scrape the AI agent's link
- * roundups go through. The session rides along when the article is on the
- * source's own domain, which is what gets a subscriber-only post back whole.
+ * roundups go through, with the site's session attached when the article is on
+ * its own domain.
  */
 export function savedFetch(sourceId: string, url: string): Promise<string> {
   return invoke<string>("saved_fetch", { sourceId, url });

@@ -12,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_saved_browser::init())
         .manage(gmail::AuthState::default())
         .manage(gmail::ConnectState::default())
         .manage(saved::SavedState::default())
@@ -36,11 +37,13 @@ pub fn run() {
             gmail::gmail_get_body,
             gmail::fetch_image,
             gmail::save_file,
-            saved::saved_request_link,
-            saved::saved_sign_in,
-            saved::saved_status,
-            saved::saved_sign_out,
-            saved::saved_collect,
+            saved::saved_open,
+            saved::saved_bounds,
+            saved::saved_back,
+            saved::saved_close,
+            saved::saved_capture,
+            saved::saved_forget,
+            saved::saved_has_session,
             saved::saved_fetch,
             met::met_search,
             print::print_file,

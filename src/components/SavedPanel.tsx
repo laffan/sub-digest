@@ -1,14 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  METHOD_LABELS,
-  availableMethods,
-  listIsEmpty,
-  listSummary,
-  sourceDomain,
-  type SavedSource,
-  type SignInMethod,
-} from "../sources";
-import type { SignInDetails } from "../saved";
+import { useState } from "react";
+import { domainFromUrl, sourceIsUsable, sourceLabel, type SavedSource } from "../sources";
 import { TimeframePicker } from "./TimeframePicker";
 import type { DateRange } from "../types";
 
@@ -16,165 +7,153 @@ interface Props {
   sources: SavedSource[];
   sourceId: string;
   onSourceChange: (id: string) => void;
-  /** The account this source is signed in as, or null. */
-  account: string | null;
-  signingIn: boolean;
-  onSignIn: (method: SignInMethod, details: SignInDetails) => void;
-  /** Asks the site to mail a sign-in link. */
-  onRequestLink: (email: string) => void;
-  onSignOut: () => void;
-  listId: string;
-  onListChange: (id: string) => void;
-  limit: number;
-  onLimitChange: (limit: number) => void;
-  collecting: boolean;
-  onCollect: () => void;
-  onEditSources: () => void;
-  /** Whatever the last sign-in step had to say — "check your mail", usually. */
-  notice: string | null;
+  onAddSource: (name: string, url: string) => void;
+  onRemoveSource: (id: string) => void;
+  /** The domain this site has a session kept for, or null. */
+  session: string | null;
+  onForgetSession: () => void;
+  onOpenBrowser: () => void;
+  /** What the last capture said it read, for the line under the button. */
+  captured: { count: number; from: string } | null;
   days: number;
   range: DateRange;
   rangeValid: boolean;
   onDaysChange: (days: number) => void;
   onRangeChange: (range: DateRange) => void;
-  /** Whether anything has been collected yet, for the hint under the controls. */
-  found: number;
 }
 
-/** How many articles one collection takes, at most. */
-const LIMITS = [25, 50, 100, 200, 500];
-
 /**
- * The saved-list input: sign in to a site, pick one of its lists, collect what's
- * on it.
+ * The saved-list input: pick a site, open it, and bring back what's on the page
+ * you land on.
  *
- * Sign-in is HTTP in the backend rather than a browser window, which is what
- * makes it the same on a Mac and on an iPad. Three ways in, and a site offers
- * whichever its recipe knows about: paste the link it mailed you, give it an
- * address and password, or paste a session cookie out of a browser.
+ * There is no sign-in here, which is the point — signing in happens in the
+ * browser the button opens, the way it happens everywhere else. What this panel
+ * holds is the short list of sites you go to and the timeframe the articles are
+ * held to.
  */
 export function SavedPanel({
   sources,
   sourceId,
   onSourceChange,
-  account,
-  signingIn,
-  onSignIn,
-  onRequestLink,
-  onSignOut,
-  listId,
-  onListChange,
-  limit,
-  onLimitChange,
-  collecting,
-  onCollect,
-  onEditSources,
-  notice,
+  onAddSource,
+  onRemoveSource,
+  session,
+  onForgetSession,
+  onOpenBrowser,
+  captured,
   days,
   range,
   rangeValid,
   onDaysChange,
   onRangeChange,
-  found,
 }: Props) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+
   const source = sources.find((s) => s.id === sourceId) ?? sources[0];
-  const methods = useMemo(() => (source ? availableMethods(source) : []), [source]);
-  const [method, setMethod] = useState<SignInMethod>(methods[0] ?? "cookie");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [link, setLink] = useState("");
-  const [cookie, setCookie] = useState("");
+  const canAdd = /^https?:\/\/\S+$/i.test(url.trim());
 
-  // A different site signs in differently; start on whatever it offers first.
-  useEffect(() => {
-    setMethod((current) => (methods.includes(current) ? current : methods[0] ?? "cookie"));
-  }, [methods]);
-
-  if (!source) {
-    return (
-      <section className="panel saved">
-        <h2 className="col-title">Saved List</h2>
-        <p className="hint">
-          No sources yet — add the site you keep a list on, and what to read it from.
-        </p>
-        <button className="secondary wide-btn" onClick={onEditSources}>
-          Add a Source…
-        </button>
-      </section>
-    );
-  }
-
-  const list = source.lists.find((l) => l.id === listId) ?? source.lists[0];
-  const domain = sourceDomain(source);
-  const canSignIn =
-    !signingIn &&
-    ((method === "link" && link.trim().length > 0) ||
-      (method === "password" && email.trim().length > 0 && password.length > 0) ||
-      (method === "cookie" && cookie.trim().length > 0));
-
-  const submit = () => {
-    if (!canSignIn) return;
-    onSignIn(method, { email, password, link, cookie });
-    setPassword("");
-    setLink("");
-    setCookie("");
+  const add = () => {
+    if (!canAdd) return;
+    onAddSource(name.trim() || domainFromUrl(url), url.trim());
+    setName("");
+    setUrl("");
+    setAdding(false);
   };
 
   return (
     <section className="panel saved">
       <div className="posts-head">
         <h2 className="col-title">Saved List</h2>
-        <button className="filters-btn" onClick={onEditSources} title="Sources and their lists">
-          Sources
-          <span className="filters-count">{sources.length}</span>
+        <button
+          className={`filters-btn${adding ? " active" : ""}`}
+          onClick={() => setAdding((v) => !v)}
+          aria-expanded={adding}
+          title="Add another site"
+        >
+          {adding ? "Cancel" : "Add site"}
         </button>
       </div>
 
-      <label>
-        Site
-        <select value={source.id} onChange={(e) => onSourceChange(e.target.value)}>
-          {sources.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name || "Untitled source"}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {account ? (
+      {adding ? (
+        <form
+          className="add-source"
+          onSubmit={(e) => {
+            e.preventDefault();
+            add();
+          }}
+        >
+          <label>
+            The list's address
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/reading-list"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </label>
+          <label>
+            What to call it
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={domainFromUrl(url) || "Example"}
+              spellCheck={false}
+            />
+          </label>
+          <button className="secondary wide-btn" type="submit" disabled={!canAdd}>
+            Add
+          </button>
+          <p className="hint">
+            Any page of links behind a login. It's only where the browser opens — you can navigate
+            anywhere from there.
+          </p>
+        </form>
+      ) : sources.length === 0 ? (
+        <p className="hint">No sites yet — add the page your saved list lives on.</p>
+      ) : (
         <>
-          <div className="account-row signed-in">
-            <span className="dot connected" />
-            <span className="account" title={`Signed in to ${domain}`}>
-              {account}
-            </span>
-          </div>
-          <button className="link" onClick={onSignOut}>
-            Sign out of {source.name || domain}
+          <label>
+            Site
+            <select value={source?.id ?? ""} onChange={(e) => onSourceChange(e.target.value)}>
+              {sources.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {sourceLabel(s)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            className="primary wide-btn"
+            onClick={onOpenBrowser}
+            disabled={!source || !sourceIsUsable(source)}
+            title={
+              source && sourceIsUsable(source)
+                ? `Open ${sourceLabel(source)} and pick a list`
+                : "This site has no address to open"
+            }
+          >
+            Open {source ? sourceLabel(source) : "the site"}…
           </button>
 
-          <label>
-            List
-            <select value={list?.id ?? ""} onChange={(e) => onListChange(e.target.value)}>
-              {source.lists.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name || "Untitled list"}
-                </option>
-              ))}
-            </select>
-          </label>
-          {list && <p className="hint list-summary">{listSummary(list)}</p>}
-
-          <label>
-            Most recent
-            <select value={limit} onChange={(e) => onLimitChange(Number(e.target.value))}>
-              {LIMITS.map((n) => (
-                <option key={n} value={n}>
-                  {n} articles
-                </option>
-              ))}
-            </select>
-          </label>
+          {captured ? (
+            <p className="hint">
+              Read {captured.count} article{captured.count === 1 ? "" : "s"} off{" "}
+              <span className="captured-from">{captured.from}</span>. Open it again to add a
+              different list — a new capture replaces this one.
+            </p>
+          ) : (
+            <p className="hint">
+              Sign in there as you normally would, go to your saved posts, and press{" "}
+              <strong>Use this page</strong>. What's on the page is what comes back.
+            </p>
+          )}
 
           <TimeframePicker
             days={days}
@@ -182,160 +161,27 @@ export function SavedPanel({
             rangeValid={rangeValid}
             onDaysChange={onDaysChange}
             onRangeChange={onRangeChange}
-          >
-            <button
-              className="secondary"
-              disabled={collecting || !rangeValid || !list || listIsEmpty(list)}
-              onClick={onCollect}
-              title={
-                list && !listIsEmpty(list)
-                  ? `Collect what's on ${list.name || "this list"}`
-                  : "This list has no address to read"
-              }
-            >
-              {collecting ? "Collecting…" : "Collect"}
-            </button>
-          </TimeframePicker>
+          />
+          <p className="hint">
+            Articles the page dated are held to this; ones it didn't date are always kept.
+          </p>
 
-          {list && listIsEmpty(list) && (
-            <p className="hint warn">
-              This list has no address to read — give it one under Sources.
-            </p>
-          )}
-
-          {found === 0 && !collecting && list && !listIsEmpty(list) && (
-            <p className="hint">
-              Collect what's on {list.name || "this list"}. Each article is fetched from the site
-              itself, so an item dated before your timeframe is left behind.
-            </p>
-          )}
-        </>
-      ) : (
-        <>
-          {methods.length > 1 && (
-            <div className="method-row" role="group" aria-label="How to sign in">
-              {methods.map((m) => (
-                <button
-                  key={m}
-                  className={`segment${m === method ? " active" : ""}`}
-                  onClick={() => setMethod(m)}
-                  aria-pressed={m === method}
-                >
-                  {METHOD_LABELS[m]}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              submit();
-            }}
-          >
-            {method === "link" && (
-              <>
-                <label>
-                  Address on the account
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                </label>
-                <button
-                  className="secondary wide-btn"
-                  type="button"
-                  disabled={signingIn || email.trim().length === 0}
-                  onClick={() => onRequestLink(email)}
-                >
-                  Email me a sign-in link
-                </button>
-                <label>
-                  The link, pasted
-                  <textarea
-                    className="paste-box"
-                    value={link}
-                    onChange={(e) => setLink(e.target.value)}
-                    placeholder={`https://${domain}/sign-in?token=…`}
-                    rows={3}
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                </label>
-                <p className="hint">
-                  <strong>Copy the link — don't open it.</strong> Opening it spends it, and the
-                  session lands in the browser instead of here. Press and hold it in Mail (or
-                  right-click on the Mac) and choose Copy Link.
-                </p>
-              </>
+          <div className="source-actions">
+            {session && (
+              <button
+                className="link"
+                onClick={onForgetSession}
+                title={`Discard the ${session} session kept for fetching articles`}
+              >
+                Forget the {session} session
+              </button>
             )}
-
-            {method === "password" && (
-              <>
-                <label>
-                  Address
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                </label>
-                <label>
-                  Password
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    autoComplete="current-password"
-                  />
-                </label>
-                <p className="hint">
-                  Sent straight to {domain} and never stored — what's kept is the session it hands
-                  back.
-                </p>
-              </>
+            {source && (
+              <button className="link danger" onClick={() => onRemoveSource(source.id)}>
+                Remove this site
+              </button>
             )}
-
-            {method === "cookie" && (
-              <>
-                <label>
-                  Session cookie from {domain}
-                  <textarea
-                    className="paste-box"
-                    value={cookie}
-                    onChange={(e) => setCookie(e.target.value)}
-                    placeholder={`${source.cookieName || "session"}=…`}
-                    rows={3}
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                </label>
-                <p className="hint">
-                  Sign in to {domain} in a browser, then copy the session cookie from its developer
-                  tools (Application → Cookies). A whole <code>name=value</code> line or the bare
-                  value both work. This is the way in to a site with no sign-in endpoint of its
-                  own — and it needs a desktop browser to get at.
-                </p>
-              </>
-            )}
-
-            <button className="primary wide-btn" type="submit" disabled={!canSignIn}>
-              {signingIn ? "Signing in…" : `Sign in to ${source.name || domain}`}
-            </button>
-          </form>
-
-          {notice && <p className="hint notice">{notice}</p>}
+          </div>
         </>
       )}
     </section>

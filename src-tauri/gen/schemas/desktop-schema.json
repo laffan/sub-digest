@@ -2527,6 +2527,12 @@
           "type": "string",
           "const": "opener:deny-reveal-item-in-dir",
           "markdownDescription": "Denies the reveal_item_in_dir command without any pre-configured scope."
+        },
+        {
+          "description": "No permissions. Opening, moving and reading the browser are all driven from the app's Rust core; the frontend never calls this plugin.",
+          "type": "string",
+          "const": "saved-browser:default",
+          "markdownDescription": "No permissions. Opening, moving and reading the browser are all driven from the app's Rust core; the frontend never calls this plugin."
         }
       ]
     },
