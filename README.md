@@ -12,7 +12,7 @@ List input does not. Setup is described in [README_DETAIL.md](README_DETAIL.md#s
 
 Download the installer for your system from the
 [Releases](../../releases) page: `.dmg` (macOS), `.msi` or `.exe` (Windows),
-`.AppImage`, `.deb` or `.rpm` (Linux).
+`.AppImage` or `.deb` (Linux).
 
 The builds are not code-signed. On macOS, if the app is blocked on first
 launch, move it to Applications and run:
